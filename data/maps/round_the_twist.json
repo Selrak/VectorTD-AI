@@ -1,0 +1,81 @@
+{
+  "name": "ROUND THE TWIST",
+  "level_index": 3,
+  "world": {
+    "width": 550,
+    "height": 450,
+    "grid": 25
+  },
+  "spawn_dir": "left",
+  "paths": [
+    [
+      1,
+      3,
+      5,
+      7,
+      9,
+      11,
+      13,
+      15,
+      17,
+      19,
+      21
+    ],
+    [
+      2,
+      4,
+      6,
+      8,
+      10,
+      12,
+      14,
+      16,
+      18,
+      20,
+      22
+    ]
+  ],
+  "markers": {
+    "1": [
+      -10.0,
+      40.0
+    ],
+    "2": null,
+    "3": null,
+    "4": null,
+    "5": null,
+    "6": null,
+    "7": [
+      45.0,
+      407.0
+    ],
+    "8": null,
+    "9": [
+      45.0,
+      115.0
+    ],
+    "10": null,
+    "11": [
+      430.0,
+      115.0
+    ],
+    "12": null,
+    "13": null,
+    "14": null,
+    "15": [
+      115.0,
+      335.0
+    ],
+    "16": null,
+    "17": null,
+    "18": null,
+    "19": null,
+    "20": null,
+    "21": null,
+    "22": null
+  },
+  "buildable": {
+    "grid_mode": "cells_25px",
+    "allowed_cells": null
+  }
+}

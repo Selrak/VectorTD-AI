@@ -1,0 +1,76 @@
+{
+  "name": "UP AND DOWN",
+  "level_index": 4,
+  "world": {
+    "width": 550,
+    "height": 450,
+    "grid": 25
+  },
+  "spawn_dir": "right",
+  "paths": [
+    [
+      1,
+      3,
+      5,
+      7,
+      9,
+      11,
+      13,
+      15,
+      17,
+      19,
+      21,
+      23
+    ],
+    [
+      2,
+      4,
+      6,
+      8,
+      10,
+      12,
+      14,
+      16,
+      18,
+      20,
+      22,
+      24
+    ]
+  ],
+  "markers": {
+    "1": null,
+    "2": null,
+    "3": null,
+    "4": null,
+    "5": null,
+    "6": null,
+    "7": null,
+    "8": null,
+    "9": null,
+    "10": null,
+    "11": null,
+    "12": null,
+    "13": null,
+    "14": null,
+    "15": null,
+    "16": null,
+    "17": null,
+    "18": null,
+    "19": null,
+    "20": null,
+    "21": null,
+    "22": null,
+    "23": [
+      560.0,
+      410.0
+    ],
+    "24": [
+      560.0,
+      390.0
+    ]
+  },
+  "buildable": {
+    "grid_mode": "cells_25px",
+    "allowed_cells": null
+  }
+}

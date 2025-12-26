@@ -1,0 +1,82 @@
+vectortd/
+  pyproject.toml
+  README.md
+
+  src/
+    vectortd/
+      __init__.py
+
+      app/
+        run_gui.py            # point d’entrée GUI (jouer)
+        run_headless.py       # point d’entrée simulation CLI (replays, batch, tests)
+        run_extract_map.py    # extraction/validation des marqueurs (SWF -> JSON)
+
+      core/
+        constants.py          # dimensions monde, pas de grille, etc.
+        rng.py                # RNG contrôlé (seed), si besoin pour tests/IA
+        clock.py              # gestion du dt/fixed-step
+
+        model/
+          state.py            # GameState (bank, lives, wave, listes creeps/tours, etc.)
+          entities.py         # dataclasses: Creep, Tower, Projectile (si conservé)
+          map.py              # MapData: markers, paths, spawn_dir, build_grid
+          types.py            # enums/str-literals: TargetMode, TowerType, CreepType
+
+        rules/
+          wave_spawner.py     # wave(), waveB(), spawn() (table des waves)
+          creep_motion.py     # déplacement sur marqueurs (pathPoint, targ...)
+          placement.py        # can_place + place_tower + grille/collisions
+          towers.py           # logique de ciblage + tir (par type de tour)
+          damage.py           # fire() : application des dégâts/effets
+          buffs.py            # doBuffs()/buff()
+
+        engine.py             # façade: step(), reset(map), act(action), observe()
+
+      io/
+        serializers.py        # save/load state, replay jsonl, etc.
+        replay.py             # enregistreur + lecteur (actions, seeds, états)
+
+      gui/
+        pyglet_app.py         # fenêtre, boucle, input
+        renderer.py           # rendu (map, tours, creeps, hp bars)
+        widgets/
+          button.py
+          panel.py
+          hud.py              # bank/lives/wave + boutons "next wave", "upgrade", modes ciblage
+        assets.py             # chargement textures/sprites (ou fallback procedural)
+
+      ai/
+        env.py                # interface stable style "environment": reset/step/obs/actions
+        policies/
+          baseline.py         # heuristiques simples
+        training/
+          train.py            # script d’entraînement (plus tard)
+          evaluate.py         # éval sur maps hold-out (plus tard)
+
+      tests/
+        test_creep_motion.py
+        test_wave_spawner.py
+        test_placement.py
+        test_determinism.py
+
+  data/
+    maps/
+      switchback.json         # markers + paths + spawn_dir (+ build_grid)
+    balance/
+      towers.json             # stats tours (coût, portée, dps...) si “data-driven”
+      waves.json              # table des waves (ou codée, mais idéalement ici)
+
+  graphics/
+    maps/                     # fonds des maps (nommés par slug, ex: switchback.png)
+    creeps/                   # sprites creeps (1.png..7.png)
+    towers/                   # sprites tours (ex: green.png)
+    masks/                    # masques de placement par map (alpha)
+      offsets.json            # offsets par map pour aligner les masques
+
+  assets/
+    raw_swf_exports/          # exports JPEXS (png/svg) bruts, non utilisés directement
+    sprites/                  # nettoyage/tri des exports (legacy, non utilisé par le runtime)
+      towers/
+      creeps/
+      ui/
+      map/

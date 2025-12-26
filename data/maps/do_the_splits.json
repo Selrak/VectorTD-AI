@@ -1,0 +1,58 @@
+{
+  "name": "DO THE SPLITS",
+  "level_index": 7,
+  "world": {
+    "width": 550,
+    "height": 450,
+    "grid": 25
+  },
+  "spawn_dir": "up",
+  "paths": [
+    [
+      1,
+      3,
+      5,
+      7,
+      9,
+      11
+    ],
+    [
+      2,
+      4,
+      6,
+      8,
+      10,
+      12
+    ]
+  ],
+  "markers": {
+    "1": null,
+    "2": [
+      108.0,
+      -10.0
+    ],
+    "3": null,
+    "4": [
+      108.0,
+      100.0
+    ],
+    "5": null,
+    "6": null,
+    "7": null,
+    "8": null,
+    "9": null,
+    "10": null,
+    "11": [
+      442.0,
+      460.0
+    ],
+    "12": [
+      454.0,
+      460.0
+    ]
+  },
+  "buildable": {
+    "grid_mode": "cells_25px",
+    "allowed_cells": null
+  }
+}
