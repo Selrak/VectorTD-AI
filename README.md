@@ -1,5 +1,25 @@
 Dans ce projet nous allons recréer VectorTD (le jeu flash de TowerDefense) de manière très simplifiée sur mac OS 10.15.7 Catalina avec VS Code 1.97.2 (commit e54c774e0add60467559eb0d1e229c6452cf8447) et Codex.
 Ensuite nous entraînerons une IA à jouer à une map de ce jeu, tout en réalisant une architecture IA qui permettra à cette IA de jouer progressivement à toutes les maps du jeu, puis enfin à d'autres jeux de TD.
 Nous avons accès au concenu du SWF d'origine par biais de décompression par JPEXS FFDec.
-Nous utiliserons python 3.14 et pyglet. La base de code ActionScript extraite par décompression du SWF est jointe sous le nom "ActionScript_codebase.txt"
+Nous utiliserons python 3.11 et pyglet. La base de code ActionScript extraite par décompression du SWF est jointe sous le nom "ActionScript_codebase.txt"
 En ce qui concerne la recréation du jeu, la plupart des animations seront ignorées (animation des ennemis, explosions, etc.) mais on gardera la barre de vie des ennemis et une version très basique des animations des tours quand elles tirent (leurs projectiles etc. mais sans fioritures aucune). Pour le menu interface, pas besoin de recréer le style non plus, simplement recréer les boutons nécessaires "Lancer la prochaine vague", les boutons pour construire des tours, l'écran qui montre les stats de la tour sélectionnée avec les boutons "Upgrade" et les boutons de choix de cible (si disponible) e.g. Close, Hard, Weak. Mais pas besoin que ces boutons soient de l'exact style du jeu d'origine, surtout si pyglet permet de créer des boutons très facilement. Ignorer les boutons de qualité graphique et de son, car nous n'aurons pas de son et une qualité graphique unique et simple. Il faudra aussi recréer l'écran de "vague en cours, vague prochaine" mais pareil aucune nécessité que ce soient les graphismes d'origine (sauf si c'est très facile avec pyglet - mais sinon utiliser du pyglet standard de base).
+
+## Lancer le jeu (GUI)
+Par defaut la map est "switchback". Pour lancer une autre map :
+
+```
+PYTHONPATH=src python3 src/vectortd/app/run_gui.py --map dev_2lanes
+```
+
+On peut aussi passer un chemin vers un JSON :
+
+```
+PYTHONPATH=src python3 src/vectortd/app/run_gui.py --map data/maps/round_the_twist.json
+```
+
+## Simulation headless
+Par defaut la map est "switchback". Exemple :
+
+```
+PYTHONPATH=src python3 src/vectortd/app/run_headless.py --map dev_line5 --seconds 3
+```

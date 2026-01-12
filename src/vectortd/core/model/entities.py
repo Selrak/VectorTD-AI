@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
@@ -20,6 +20,7 @@ class Creep:
     max_speed: float
     hp: float
     maxhp: float
+    alive: bool = field(default=True, compare=False)
 
 
 @dataclass(slots=True)
@@ -36,3 +37,34 @@ class Tower:
     base_cost: int
     base_range: int
     base_damage: int
+    target_mode: str = "closest"
+    rof: int = 0
+    cooldown: float = 0.0
+    retarget_delay: int = 10
+    target: Creep | None = None
+    shot_timer: float = 0.0
+    shot_x: float = 0.0
+    shot_y: float = 0.0
+    shot_segments: list[tuple[float, float, float, float]] = field(default_factory=list)
+    shot_opacity: int = 200
+
+
+@dataclass(slots=True)
+class PulseShot:
+    tower: Tower
+    target: Creep
+    from_x: float
+    from_y: float
+    damage: float
+    alpha: float
+    slow: bool = False
+
+
+@dataclass(slots=True)
+class RocketShot:
+    kind: str
+    x: float
+    y: float
+    target: Creep | None
+    speed: float
+    damage: float

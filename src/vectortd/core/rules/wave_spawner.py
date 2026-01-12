@@ -15,6 +15,21 @@ LEVELS: list[int] = [
     4, 2, 5, 2, 7, 5, 2, 1, 2, 8
 ]
 
+CREEP_NAMES: dict[int, str] = {
+    1: "Red Shredder",
+    2: "Blue Spinner",
+    3: "Green Flyer",
+    4: "Yellow Sprinter",
+    5: "Big Purple Box",
+    6: "Bonus",
+    7: "Hard Grey + Bonus",
+    8: "All types",
+}
+
+
+def creep_name(type_id: int) -> str:
+    return CREEP_NAMES.get(int(type_id), f"Type {type_id}")
+
 
 def _int(x: float) -> int:
     # Flash int() tronque vers 0.
@@ -65,6 +80,8 @@ def start_next_wave(state, map_data) -> None:
         return
 
     wave_type = LEVELS[state.level - 1]  # Type = levels[level-1]
+    state.last_wave_type = int(wave_type)
+    state.last_wave_hp = int(state.base_hp)
 
     dx, dy = _spawn_offset(map_data.spawn_dir)
 
@@ -87,6 +104,80 @@ def start_next_wave(state, map_data) -> None:
     else:
         state.base_hp += _int(state.base_hp / 5)
     state.base_worth += 1
+
+
+def wave_display_info(state, map_data) -> dict[str, dict[str, int | str | bool] | None]:
+    """
+    Infos UI/observation : vague courante + suivante (inspiré du SWF).
+    """
+    level = int(getattr(state, "level", 0))
+    base_hp = int(getattr(state, "base_hp", 0))
+    map_level = int(getattr(map_data, "level_index", 1))
+
+    current = None
+    if level > 0 and getattr(state, "last_wave_type", None) is not None:
+        cur_type = int(state.last_wave_type)
+        cur_hp = int(getattr(state, "last_wave_hp", base_hp))
+        current = {
+            "type": cur_type,
+            "name": creep_name(cur_type),
+            "hp": cur_hp,
+            "show_sprite": True,
+        }
+
+    next_info = None
+    if level < len(LEVELS):
+        next_type = int(LEVELS[level])
+        if level == 0:
+            next_hp = base_hp
+        else:
+            if map_level < 5:
+                next_hp = base_hp + _int(base_hp / 5)
+            else:
+                next_hp = base_hp + _int(base_hp / 4)
+        if next_type == 6:
+            next_hp = int(next_hp * 1.5)
+        next_name = creep_name(next_type)
+        show_sprite = True
+        if level == (len(LEVELS) - 1):
+            next_name = "???"
+            show_sprite = False
+        next_info = {
+            "type": next_type,
+            "name": next_name,
+            "hp": int(next_hp),
+            "show_sprite": show_sprite,
+        }
+
+    return {"current": current, "next": next_info}
+
+
+def maybe_auto_next_wave(state, map_data) -> bool:
+    """
+    Équivalent de l'autoLevel SWF :
+    - si plus de creeps et dernière vague atteinte => game_over
+    - si plus de creeps et auto_level actif => wave()
+    """
+    if getattr(state, "paused", False):
+        return False
+    if getattr(state, "game_over", False):
+        return False
+
+    creeps = getattr(state, "creeps", [])
+    if len(creeps) != 0:
+        return False
+
+    # Fin des vagues (équivalent creepArray vide et level==40).
+    if state.level >= len(LEVELS):
+        state.game_over = True
+        state.game_won = True
+        return True
+
+    if getattr(state, "auto_level", False):
+        start_next_wave(state, map_data)
+        return True
+
+    return False
 
 
 def dev_spawn_wave(state, map_data, *, creeps_per_lane: int = 3, wave_type: int = 1) -> None:
@@ -151,16 +242,16 @@ def _spawn(state, map_data, x: float, y: float, path: list[int], t: int, *, bHP:
     else:
         xval, yval = dx / dist, dy / dist
 
-    # création du creep (le type est défini dans core.engine.Creep)
+    # création du creep (type canonique défini dans core.model.entities.Creep)
     CreepCls = None
     try:
         # import local et tardif pour éviter dépendances circulaires
-        from ..engine import Creep as CreepCls  # type: ignore
+        from ..model.entities import Creep as CreepCls  # type: ignore
     except Exception:
         pass
 
     if CreepCls is None:
-        raise RuntimeError("Creep class not found (expected core.engine.Creep)")
+        raise RuntimeError("Creep class not found (expected core.model.entities.Creep)")
 
     c = CreepCls(
         x=float(x),

@@ -4,8 +4,9 @@ import argparse
 
 from vectortd.core.model.map import load_map_json
 from vectortd.core.model.state import GameState
-from vectortd.core.rules.wave_spawner import dev_spawn_wave
+from vectortd.core.rules.wave_spawner import dev_spawn_wave, maybe_auto_next_wave
 from vectortd.core.rules.creep_motion import step_creeps
+from vectortd.core.rules.tower_attack import step_towers
 
 
 def _resolve_map_path(map_arg: str) -> Path:
@@ -19,7 +20,11 @@ def _resolve_map_path(map_arg: str) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--map", required=True, help="Map name (e.g. dev_2lanes) or path to json")
+    ap.add_argument(
+        "--map",
+        default="switchback",
+        help="Map name (e.g. dev_2lanes) or path to json",
+    )
     ap.add_argument("--seconds", type=float, default=5.0)
     ap.add_argument("--fps", type=int, default=60)
     args = ap.parse_args()
@@ -32,6 +37,8 @@ def main() -> int:
     ticks = int(args.seconds * args.fps)
     for _ in range(ticks):
         step_creeps(state, map_data, dt_scale=1.0)
+        step_towers(state, map_data, dt_scale=1.0)
+        maybe_auto_next_wave(state, map_data)
         if state.game_over:
             break
 

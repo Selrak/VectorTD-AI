@@ -32,12 +32,14 @@ class SidebarLayout:
         width: float,
         padding: float = 12,
         spacing: float = 10,
+        min_y: float | None = None,
     ) -> None:
         self.x = x + padding
         self.y_top = y_top - padding
         self.width = max(0.0, width - 2 * padding)
         self.spacing = spacing
         self._cursor = self.y_top
+        self._min_y = min_y
 
     def add_label(
         self,
@@ -60,10 +62,14 @@ class SidebarLayout:
         )
         height = max(label.content_height, float(font_size))
         self._cursor -= height + self.spacing
+        if self._min_y is not None:
+            self._cursor = max(self._cursor, self._min_y)
         return label
 
     def add_spacer(self, height: float) -> None:
         self._cursor -= max(0.0, height)
+        if self._min_y is not None:
+            self._cursor = max(self._cursor, self._min_y)
 
     def add_grid(
         self,
@@ -86,7 +92,43 @@ class SidebarLayout:
 
     def add_box(self, height: float) -> tuple[float, float, float, float]:
         box_height = max(0.0, height)
+        if self._min_y is not None:
+            box_height = min(box_height, max(0.0, self._cursor - self._min_y))
         y = self._cursor - box_height
         bounds = (self.x, y, self.width, box_height)
         self._cursor -= box_height + self.spacing
+        if self._min_y is not None:
+            self._cursor = max(self._cursor, self._min_y)
+        return bounds
+
+    def remaining_height(self) -> float:
+        if self._min_y is None:
+            return self._cursor
+        return max(0.0, self._cursor - self._min_y)
+
+
+class BottomLayout:
+    def __init__(
+        self,
+        *,
+        x: float,
+        y_bottom: float,
+        width: float,
+        padding: float = 12,
+        spacing: float = 10,
+    ) -> None:
+        self.x = x + padding
+        self.y_bottom = y_bottom + padding
+        self.width = max(0.0, width - 2 * padding)
+        self.spacing = spacing
+        self._cursor = self.y_bottom
+
+    @property
+    def cursor_y(self) -> float:
+        return self._cursor
+
+    def add_box(self, height: float) -> tuple[float, float, float, float]:
+        box_height = max(0.0, height)
+        bounds = (self.x, self._cursor, self.width, box_height)
+        self._cursor += box_height + self.spacing
         return bounds

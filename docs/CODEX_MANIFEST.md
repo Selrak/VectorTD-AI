@@ -130,10 +130,29 @@ Ces scripts montrent comment le SWF déclenche les fonctions core, utile pour co
 
 ---
 
-## 6) Infos diverses
+## 6) Tests (definitions JSON)
+Quand un nouveau test est fourni sous forme de définition JSON dans `data/tests` :
+- Créer ou mettre à jour un test Python dans `src/vectortd/tests` qui charge ce JSON et exécute le runner (pattern de `src/vectortd/tests/test_green_laser.py`).
+- Mettre à jour `.vscode/launch.json` → `inputs.testName.options` pour ajouter l'option du nouveau test.
+Notes :
+- Le GUI en mode test lit uniquement `data/tests`.
+- Le nom attendu par `--test` est le **nom de fichier sans extension** (ex: `data/tests/foo.json` → `--test foo`), pas le champ `"name"`.
+
+## 7) Infos diverses
 
 - Des infos sur les précédentes exécutions sont présents dans runs/N où N est un compteur qui s'incrémente à chaque exécution :
   - Des screenshots sont disponibles dans screenshots . Aller les regarder dès que nécessaire (question de GUI, de rendu, etc.)
   - Un log du terminal est présent, le lire dès que pertinent.
+- Des notes de TODO liées à l'IA sont dans `TODO/` (ex: `TODO/TRAIN_WHILE_EVAL.md`).
 
 - Le jeu est représenté en deux parties : l'écran de jeu (game screen) à gauche et la barre de contrôle (control bar or sidebar) à droite.
+
+## 8) Développement IA
+
+Chaque fois que nous ferons des découvertes concernant l'apprentissage IA (pas des bugs de code ou d'environnement mais vraiment des faiblesses ou impasses de l'apprentissages, ou des améliorations ou modifications dans le retour/la récompense, ou des changements dans l'archi de l'IA ou l'agorithme d'apprentissage) tous les choix et leurs raisons (et les observations qui ont mené à tout ça) devront être documentées dans un paragrpahe de AI_LESSONS_LEARNED.md Exemple :
+
+Observation : l'agent place des tours dans des endroits éloignés des ennemis et qui restent inactives.
+Conséquence : argent perdu
+Solution : Mettre une récompense pour chaque cycle qu'une tour aura été active pendant une vague. Plus les tours placées sont actives, plus elles génèrent de récompense.
+
+ATTENTION c'est un exemple, ça ne veut pas dire que c'est une bonne idée !

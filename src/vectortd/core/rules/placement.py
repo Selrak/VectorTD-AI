@@ -13,6 +13,9 @@ from ..model.entities import Tower
 from ..model.towers import get_tower_def
 
 
+_ALLOWED_CELLS_SET_CACHE: dict[int, set[tuple[int, int]]] = {}
+
+
 @dataclass(frozen=True)
 class HitMask:
     width: int
@@ -68,9 +71,9 @@ def cell_is_buildable(
     grid = int(getattr(map_data, "grid", 25))
     cx = cell_x + grid * 0.5
     cy = cell_y + grid * 0.5
-    allowed_cells = _allowed_cells_from_map(map_data)
+    allowed_cells = _allowed_cells_set(map_data)
     if allowed_cells is not None:
-        return (cell_x, cell_y) in set(allowed_cells)
+        return (cell_x, cell_y) in allowed_cells
 
     hit_mask = _hit_mask_for_map(map_data)
     if hit_mask is not None:
@@ -149,6 +152,16 @@ def place_tower(
         base_cost=tower_def.base_cost,
         base_range=tower_def.base_range,
         base_damage=tower_def.base_damage,
+        target_mode=tower_def.target_mode,
+        rof=tower_def.rof,
+        cooldown=0.0,
+        retarget_delay=(10 if tower_def.rof == 0 else tower_def.rof),
+        target=None,
+        shot_timer=0.0,
+        shot_x=0.0,
+        shot_y=0.0,
+        shot_segments=[],
+        shot_opacity=200,
     )
     towers.append(tower)
     return tower
@@ -171,11 +184,56 @@ def upgrade_tower(state, tower) -> bool:
     return True
 
 
+def sell_tower(state, tower) -> int | None:
+    if tower is None:
+        return None
+    towers = getattr(state, "towers", None)
+    if towers is None or tower not in towers:
+        return None
+    sale_price = int(tower.cost / 100 * 75)
+    bank = getattr(state, "bank", None)
+    if bank is not None:
+        state.bank = int(bank) + sale_price
+    towers.remove(tower)
+    pulses = getattr(state, "pulses", None)
+    if pulses:
+        state.pulses = [pulse for pulse in pulses if pulse.tower is not tower]
+    return sale_price
+
+
+def set_target_mode(tower, mode: str) -> bool:
+    if tower is None:
+        return False
+    try:
+        tower_def = get_tower_def(str(tower.kind))
+    except KeyError:
+        return False
+    target_mode = str(mode)
+    if target_mode not in tower_def.target_modes:
+        return False
+    tower.target_mode = target_mode
+    tower.target = None
+    return True
+
+
 def _allowed_cells_from_map(map_data) -> list[tuple[int, int]] | None:
     cells = getattr(map_data, "buildable_cells", None)
     if cells:
         return list(cells)
     return None
+
+
+def _allowed_cells_set(map_data) -> set[tuple[int, int]] | None:
+    cells = getattr(map_data, "buildable_cells", None)
+    if not cells:
+        return None
+    key = id(map_data)
+    cached = _ALLOWED_CELLS_SET_CACHE.get(key)
+    if cached is not None:
+        return cached
+    cell_set = set((int(cell[0]), int(cell[1])) for cell in cells)
+    _ALLOWED_CELLS_SET_CACHE[key] = cell_set
+    return cell_set
 
 
 def _buildable_cells_from_mask(

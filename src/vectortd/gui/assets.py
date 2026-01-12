@@ -7,6 +7,16 @@ from typing import Dict
 
 TOWER_IMAGES = {
     "green": "green.png",
+    "green2": "green2.png",
+    "green3": "green3.png",
+    "red_refractor": "red_refractor.png",
+    "red_spammer": "red_spammer.png",
+    "red_rockets": "red_rockets.png",
+    "purple1": "purple1.png",
+    "purple2": "purple_2.png",
+    "purple3": "purple3.png",
+    "blue1": "blue1.png",
+    "blue2": "blue2.png",
 }
 
 
