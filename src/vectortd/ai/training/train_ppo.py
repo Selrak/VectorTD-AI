@@ -22,7 +22,8 @@ from vectortd.ai.training.ppo import (
     batch_to_tensor,
     compute_gae,
 )
-from vectortd.io.replay import Replay, save_replay
+from vectortd.ai.training.pause import PauseController, normalize_pause_key
+from vectortd.io.replay import Replay, build_state_check, save_replay
 
 
 def _resolve_root() -> Path:
@@ -132,7 +133,13 @@ def _append_eval_log(path: Path, row: dict[str, float | int | str]) -> None:
         handle.write(",".join(values) + "\n")
 
 
-def _save_replay(env: VectorTDEventEnv, replay_dir: Path, step: int) -> Path | None:
+def _save_replay(
+    env: VectorTDEventEnv,
+    replay_dir: Path,
+    step: int,
+    *,
+    state_checks: list[dict] | None = None,
+) -> Path | None:
     if env.engine is None:
         return None
     if not env.episode_actions:
@@ -153,7 +160,7 @@ def _save_replay(env: VectorTDEventEnv, replay_dir: Path, step: int) -> Path | N
         map_path=env.map_path,
         seed=int(seed),
         waves=list(env.episode_actions),
-        state_hashes=None,
+        state_hashes=state_checks,
         final_summary=summary,
     )
     path = _replay_path(replay_dir, step)
@@ -169,6 +176,39 @@ def _action_masks_from_results(results: list[Any], fallback: list[Any]) -> list[
             mask = fallback[idx]
         masks.append(mask)
     return masks
+
+
+def _is_start_wave(action_id: int, env: VectorTDEventEnv) -> bool:
+    if env.action_spec is None:
+        return False
+    return int(action_id) == env.action_spec.offsets.start_wave
+
+
+def _maybe_record_state_check(
+    state_checks: list[dict] | None,
+    *,
+    env: VectorTDEventEnv,
+    pre_check: dict | None,
+    wave_ticks: int,
+) -> None:
+    if state_checks is None or pre_check is None:
+        return
+    if env.engine is None or env.action_spec is None:
+        return
+    wave_idx = max(0, len(env.episode_actions) - 1)
+    post_check = build_state_check(
+        env.engine.state,
+        env.map_data,
+        env.action_spec,
+        wave_ticks=wave_ticks,
+    )
+    state_checks.append(
+        {
+            "wave_index": wave_idx,
+            "pre": pre_check,
+            "post": post_check,
+        }
+    )
 
 
 def _to_mask_tensor(masks: list[Any], device: torch.device) -> torch.Tensor:
@@ -248,6 +288,8 @@ def main() -> int:
     ap.add_argument("--replay-dir", default=None)
     ap.add_argument("--progress-interval-sec", type=float, default=60.0)
     ap.add_argument("--plot-dashboard", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--pause", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--pause-key", default="space")
     args = ap.parse_args()
 
     device = torch.device(args.device)
@@ -298,6 +340,8 @@ def main() -> int:
     sys.stdout = _Tee(stdout_orig, log_handle)
     sys.stderr = _Tee(stderr_orig, log_handle)
     print(f"run_dir={run_dir}")
+    pause = PauseController(enabled=args.pause, key=normalize_pause_key(args.pause_key))
+    pause.start()
 
     total_steps = 0
     last_log_time = time.perf_counter()
@@ -319,6 +363,7 @@ def main() -> int:
 
     try:
         while total_steps < args.total_steps:
+            pause.wait_if_paused()
             #print(f"update_start step={total_steps} update={update_idx + 1}")
             obs_buf = []
             actions_buf = []
@@ -329,6 +374,7 @@ def main() -> int:
             masks_buf = []
 
             for _ in range(args.rollout_steps):
+                pause.wait_if_paused()
                 obs_tensor = batch_to_tensor(obs_list, max_towers=max_towers, slot_size=slot_size, device=device)
                 mask_tensor = _to_mask_tensor(mask_list, device=device)
                 actions, log_probs, values = agent.act(obs_tensor, mask_tensor)
@@ -476,7 +522,11 @@ def main() -> int:
                 losses = 0
                 eval_start = time.perf_counter()
                 eval_log_interval = args.progress_interval_sec
+                replay_state_checks: list[dict] | None = None
                 for eval_idx in range(args.eval_episodes):
+                    pause.wait_if_paused()
+                    collect_checks = pending_replay and eval_idx == (args.eval_episodes - 1)
+                    state_checks: list[dict] | None = [] if collect_checks else None
                     obs = eval_env.reset(map_path=args.map, seed=args.seed + 1000 + eval_idx)
                     done = False
                     episode_return = 0.0
@@ -486,15 +536,39 @@ def main() -> int:
                     last_eval_log = time.perf_counter()
                     print(f"eval_episode_start episode={eval_idx + 1} seed={args.seed + 1000 + eval_idx}")
                     while not done:
+                        pause.wait_if_paused()
                         obs_tensor = batch_to_tensor([obs], max_towers=max_towers, slot_size=slot_size, device=device)
                         mask_tensor = _to_mask_tensor([eval_env.get_action_mask()], device=device)
                         action, _, _ = agent.act(obs_tensor, mask_tensor, deterministic=True)
-                        obs, reward, done, info = eval_env.step(int(action.item()))
+                        action_id = int(action.item())
+                        is_start_wave = _is_start_wave(action_id, eval_env)
+                        pre_check = None
+                        if (
+                            is_start_wave
+                            and state_checks is not None
+                            and eval_env.engine is not None
+                            and eval_env.action_spec is not None
+                        ):
+                            pre_check = build_state_check(
+                                eval_env.engine.state,
+                                eval_env.map_data,
+                                eval_env.action_spec,
+                                wave_ticks=0,
+                            )
+                        obs, reward, done, info = eval_env.step(action_id)
                         episode_return += float(reward)
                         actions += 1
                         steps += 1
-                        if "wave_ticks" in info:
+                        did_wave = "wave_ticks" in info
+                        if did_wave:
                             wave_count += 1
+                            if pre_check is not None:
+                                _maybe_record_state_check(
+                                    state_checks,
+                                    env=eval_env,
+                                    pre_check=pre_check,
+                                    wave_ticks=int(info.get("wave_ticks", 0) or 0),
+                                )
                         if eval_log_interval > 0 and time.perf_counter() - last_eval_log >= eval_log_interval:
                             last_eval_log = time.perf_counter()
                             state = eval_env.engine.state if eval_env.engine is not None else None
@@ -526,6 +600,8 @@ def main() -> int:
                             wins += 1
                         if getattr(state, "game_over", False):
                             losses += 1
+                    if collect_checks:
+                        replay_state_checks = state_checks
                 elapsed_eval = time.perf_counter() - eval_start
                 eval_episodes = max(1, args.eval_episodes)
                 mean_score = sum(episode_scores) / eval_episodes
@@ -578,7 +654,7 @@ def main() -> int:
                 )
                 did_eval = True
                 if pending_replay:
-                    _save_replay(eval_env, replay_dir, total_steps)
+                    _save_replay(eval_env, replay_dir, total_steps, state_checks=replay_state_checks)
                     pending_replay = False
                     replays_saved += 1
                 while next_eval_step is not None and next_eval_step <= total_steps:
@@ -589,12 +665,35 @@ def main() -> int:
                 replay_seed = args.seed + 2000 + replays_saved
                 obs = replay_env.reset(map_path=args.map, seed=replay_seed)
                 done = False
+                state_checks: list[dict] | None = []
                 while not done:
+                    pause.wait_if_paused()
                     obs_tensor = batch_to_tensor([obs], max_towers=max_towers, slot_size=slot_size, device=device)
                     mask_tensor = _to_mask_tensor([replay_env.get_action_mask()], device=device)
                     action, _, _ = agent.act(obs_tensor, mask_tensor, deterministic=True)
-                    obs, _, done, _ = replay_env.step(int(action.item()))
-                _save_replay(replay_env, replay_dir, total_steps)
+                    action_id = int(action.item())
+                    is_start_wave = _is_start_wave(action_id, replay_env)
+                    pre_check = None
+                    if (
+                        is_start_wave
+                        and replay_env.engine is not None
+                        and replay_env.action_spec is not None
+                    ):
+                        pre_check = build_state_check(
+                            replay_env.engine.state,
+                            replay_env.map_data,
+                            replay_env.action_spec,
+                            wave_ticks=0,
+                        )
+                    obs, _, done, info = replay_env.step(action_id)
+                    if "wave_ticks" in info and pre_check is not None:
+                        _maybe_record_state_check(
+                            state_checks,
+                            env=replay_env,
+                            pre_check=pre_check,
+                            wave_ticks=int(info.get("wave_ticks", 0) or 0),
+                        )
+                _save_replay(replay_env, replay_dir, total_steps, state_checks=state_checks)
                 pending_replay = False
                 replays_saved += 1
             if did_eval:
@@ -605,6 +704,7 @@ def main() -> int:
             _run_dashboard(train_log_path, eval_log_path, map_name=args.map, out_dir=run_dir / "dashboard")
         return 0
     finally:
+        pause.stop()
         sys.stdout = stdout_orig
         sys.stderr = stderr_orig
         log_handle.close()

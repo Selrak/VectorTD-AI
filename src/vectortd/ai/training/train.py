@@ -11,7 +11,8 @@ from vectortd.ai.actions import Noop, StartWave
 from vectortd.ai.env import VectorTDEventEnv
 from vectortd.ai.policies.baseline import make_policy
 from vectortd.ai.rewards import RewardConfig
-from vectortd.io.replay import Replay, save_replay
+from vectortd.ai.training.pause import PauseController, normalize_pause_key
+from vectortd.io.replay import Replay, build_state_check, save_replay
 
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,13 @@ def _replay_path(replay_dir: Path, episode: int) -> Path:
     return replay_dir / f"replay_{episode:06d}.json"
 
 
-def _save_replay(env: VectorTDEventEnv, replay_dir: Path, episode: int) -> Path | None:
+def _save_replay(
+    env: VectorTDEventEnv,
+    replay_dir: Path,
+    episode: int,
+    *,
+    state_checks: list[dict] | None = None,
+) -> Path | None:
     if env.engine is None:
         return None
     if not env.episode_actions:
@@ -97,7 +104,7 @@ def _save_replay(env: VectorTDEventEnv, replay_dir: Path, episode: int) -> Path 
         map_path=env.map_path,
         seed=int(seed),
         waves=list(env.episode_actions),
-        state_hashes=None,
+        state_hashes=state_checks,
         final_summary=summary,
     )
     path = _replay_path(replay_dir, episode)
@@ -147,7 +154,9 @@ def _run_episode(
     max_steps: int,
     max_waves: int | None,
     collect_rollout: bool,
-) -> tuple[EpisodeSummary, list[Transition]]:
+    collect_state_checks: bool = False,
+    pause: PauseController | None = None,
+) -> tuple[EpisodeSummary, list[Transition], list[dict] | None]:
     env.reset(map_path=map_name, seed=seed)
     policy.reset(env)
 
@@ -158,8 +167,11 @@ def _run_episode(
     obs: dict | None = None
     stop_reason = "max_steps"
     rollout: list[Transition] = []
+    state_checks: list[dict] | None = [] if collect_state_checks else None
 
     while not done and steps < max_steps:
+        if pause is not None:
+            pause.wait_if_paused()
         if max_waves is not None and waves >= max_waves:
             stop_reason = "max_waves"
             break
@@ -167,11 +179,41 @@ def _run_episode(
         if action is None:
             action = Noop()
         is_start_wave = _is_start_wave(action, env)
+        pre_check = None
+        if (
+            is_start_wave
+            and state_checks is not None
+            and env.engine is not None
+            and env.action_spec is not None
+        ):
+            pre_check = build_state_check(
+                env.engine.state,
+                env.map_data,
+                env.action_spec,
+                wave_ticks=0,
+            )
         obs, reward, done, info = env.step(action)
         steps += 1
         total_reward += float(reward)
-        if is_start_wave:
+        did_wave = "wave_ticks" in info
+        if did_wave:
             waves += 1
+            if pre_check is not None and env.engine is not None and env.action_spec is not None:
+                wave_idx = max(0, len(env.episode_actions) - 1)
+                wave_ticks = int(info.get("wave_ticks", 0) or 0)
+                post_check = build_state_check(
+                    env.engine.state,
+                    env.map_data,
+                    env.action_spec,
+                    wave_ticks=wave_ticks,
+                )
+                state_checks.append(
+                    {
+                        "wave_index": wave_idx,
+                        "pre": pre_check,
+                        "post": post_check,
+                    }
+                )
         if collect_rollout:
             rollout.append(
                 Transition(
@@ -208,7 +250,7 @@ def _run_episode(
         game_won=game_won,
         stop_reason=stop_reason,
     )
-    return summary, rollout
+    return summary, rollout, state_checks
 
 
 def _run_eval(
@@ -220,6 +262,7 @@ def _run_eval(
     max_waves: int | None,
     max_build_actions: int,
     reward_config: RewardConfig,
+    pause: PauseController | None = None,
 ) -> dict:
     results: list[dict] = []
     total_score = 0.0
@@ -232,7 +275,7 @@ def _run_eval(
                 reward_config=reward_config,
             )
             policy = make_policy(policy_name, seed=seed, verbose=False)
-            summary, _ = _run_episode(
+            summary, _, _ = _run_episode(
                 episode=0,
                 env=env,
                 policy=policy,
@@ -241,6 +284,8 @@ def _run_eval(
                 max_steps=max_steps,
                 max_waves=max_waves,
                 collect_rollout=False,
+                collect_state_checks=False,
+                pause=pause,
             )
             results.append(
                 {
@@ -292,6 +337,8 @@ def main() -> int:
     ap.add_argument("--build-action-limit-penalty", type=float, default=-1.0)
     ap.add_argument("--invalid-action-penalty", type=float, default=0.0)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--pause", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--pause-key", default="space")
     args = ap.parse_args()
 
     logging.basicConfig(
@@ -325,6 +372,8 @@ def main() -> int:
         reward_config=reward_config,
     )
     policy = make_policy(args.policy, seed=seeds[0], verbose=args.verbose)
+    pause = PauseController(enabled=args.pause, key=normalize_pause_key(args.pause_key))
+    pause.start()
 
     config_payload = {
         "policy": args.policy,
@@ -347,69 +396,77 @@ def main() -> int:
         },
     }
 
-    for episode_idx in range(1, args.episodes + 1):
-        map_name = maps[(episode_idx - 1) % len(maps)]
-        seed = seeds[(episode_idx - 1) % len(seeds)]
-        summary, rollout = _run_episode(
-            episode=episode_idx,
-            env=env,
-            policy=policy,
-            map_name=map_name,
-            seed=seed,
-            max_steps=args.max_steps,
-            max_waves=args.max_waves,
-            collect_rollout=True,
-        )
-        if hasattr(policy, "update"):
-            try:
-                policy.update(rollout)
-            except TypeError:
-                pass
-        logger.info(
-            "episode=%s map=%s seed=%s steps=%s waves=%s reward=%.2f score=%s lives=%s bank=%s stop=%s",
-            summary.episode,
-            summary.map_name,
-            summary.seed,
-            summary.steps,
-            summary.waves,
-            summary.total_reward,
-            summary.score,
-            summary.lives,
-            summary.bank,
-            summary.stop_reason,
-        )
-
-        if args.checkpoint_every > 0 and (episode_idx % args.checkpoint_every) == 0:
-            path = _save_checkpoint(
-                checkpoint_dir,
-                episode_idx,
-                summary,
-                policy_name=args.policy,
-                config=config_payload,
-            )
-            logger.info("checkpoint=%s", path)
-
-        if args.save_replay_every > 0 and (episode_idx % args.save_replay_every) == 0:
-            _save_replay(env, replay_dir, episode_idx)
-
-        if args.eval_every > 0 and (episode_idx % args.eval_every) == 0:
-            eval_summary = _run_eval(
-                policy_name=args.policy,
-                eval_maps=eval_maps,
-                eval_seeds=eval_seeds,
+    try:
+        for episode_idx in range(1, args.episodes + 1):
+            pause.wait_if_paused()
+            map_name = maps[(episode_idx - 1) % len(maps)]
+            seed = seeds[(episode_idx - 1) % len(seeds)]
+            save_replay_now = args.save_replay_every > 0 and (episode_idx % args.save_replay_every) == 0
+            summary, rollout, state_checks = _run_episode(
+                episode=episode_idx,
+                env=env,
+                policy=policy,
+                map_name=map_name,
+                seed=seed,
                 max_steps=args.max_steps,
                 max_waves=args.max_waves,
-                max_build_actions=args.max_build_actions,
-                reward_config=reward_config,
+                collect_rollout=True,
+                collect_state_checks=save_replay_now,
+                pause=pause,
             )
+            if hasattr(policy, "update"):
+                try:
+                    policy.update(rollout)
+                except TypeError:
+                    pass
             logger.info(
-                "eval episode=%s count=%s mean_score=%.2f mean_waves=%.2f mean_lives=%.2f",
-                episode_idx,
-                eval_summary["count"],
-                eval_summary["mean_score"],
-                eval_summary["mean_waves"],
-                eval_summary["mean_lives"],
+                "episode=%s map=%s seed=%s steps=%s waves=%s reward=%.2f score=%s lives=%s bank=%s stop=%s",
+                summary.episode,
+                summary.map_name,
+                summary.seed,
+                summary.steps,
+                summary.waves,
+                summary.total_reward,
+                summary.score,
+                summary.lives,
+                summary.bank,
+                summary.stop_reason,
             )
+
+            if args.checkpoint_every > 0 and (episode_idx % args.checkpoint_every) == 0:
+                path = _save_checkpoint(
+                    checkpoint_dir,
+                    episode_idx,
+                    summary,
+                    policy_name=args.policy,
+                    config=config_payload,
+                )
+                logger.info("checkpoint=%s", path)
+
+            if save_replay_now:
+                _save_replay(env, replay_dir, episode_idx, state_checks=state_checks)
+
+            if args.eval_every > 0 and (episode_idx % args.eval_every) == 0:
+                eval_summary = _run_eval(
+                    policy_name=args.policy,
+                    eval_maps=eval_maps,
+                    eval_seeds=eval_seeds,
+                    max_steps=args.max_steps,
+                    max_waves=args.max_waves,
+                    max_build_actions=args.max_build_actions,
+                    reward_config=reward_config,
+                    pause=pause,
+                )
+                logger.info(
+                    "eval episode=%s count=%s mean_score=%.2f mean_waves=%.2f mean_lives=%.2f",
+                    episode_idx,
+                    eval_summary["count"],
+                    eval_summary["mean_score"],
+                    eval_summary["mean_waves"],
+                    eval_summary["mean_lives"],
+                )
+    finally:
+        pause.stop()
 
     return 0
 

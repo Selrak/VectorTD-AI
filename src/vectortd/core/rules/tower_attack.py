@@ -56,14 +56,6 @@ def step_towers(
     width = float(getattr(map_data, "width", 0.0))
     height = float(getattr(map_data, "height", 0.0))
     grid = float(getattr(map_data, "grid", 25.0))
-    creeps_snapshot = list(creeps)
-    in_bounds_25 = [False] * len(creeps_snapshot)
-    if creeps_snapshot:
-        for idx, creep in enumerate(creeps_snapshot):
-            x = float(creep.x)
-            y = float(creep.y)
-            in_bounds_25[idx] = (ROCKET_BOUNDS_MIN < x < width) and (ROCKET_BOUNDS_MIN < y < height)
-
     timing_full = timing is not None and timing_mode == "full"
     timing_kind = timing is not None and timing_mode == "tower_kind"
     if timing_full or timing_kind:
@@ -87,7 +79,7 @@ def step_towers(
 
     if timing_full:
         t0 = perf_counter()
-    _step_rockets(state, creeps_snapshot, width, height, dt_scale, in_bounds_25=in_bounds_25)
+    _step_rockets(state, creeps, width, height, dt_scale)
     if timing_full:
         rocket_time += perf_counter() - t0
 
@@ -159,8 +151,6 @@ def step_towers(
                 origin_x,
                 origin_y,
                 grid,
-                creeps_snapshot,
-                in_bounds_25,
             )
             if timing_full:
                 special_time += perf_counter() - t0
@@ -518,8 +508,6 @@ def _fire_red_refractor(
     origin_x: float,
     origin_y: float,
     grid: float,
-    creeps_snapshot: list[Creep],
-    in_bounds_25: list[bool],
 ) -> None:
     tower.cooldown = float(tower.rof)
     target = tower.target
@@ -538,12 +526,11 @@ def _fire_red_refractor(
             state,
             tower,
             target,
-            creeps_snapshot,
+            creeps,
             width,
             height,
             origin_x,
             origin_y,
-            in_bounds_25=in_bounds_25,
         )
         return
 
@@ -556,12 +543,11 @@ def _fire_red_refractor(
         state,
         tower,
         target,
-        creeps_snapshot,
+        creeps,
         width,
         height,
         origin_x,
         origin_y,
-        in_bounds_25=in_bounds_25,
     )
 
 
@@ -574,8 +560,6 @@ def _apply_red_refractor_hit(
     height: float,
     origin_x: float,
     origin_y: float,
-    *,
-    in_bounds_25: list[bool] | None = None,
 ) -> None:
     segments: list[tuple[float, float, float, float]] = [
         (origin_x, origin_y, float(target.x), float(target.y))
@@ -585,17 +569,13 @@ def _apply_red_refractor_hit(
 
     kills: list[Creep] = []
     kill_ids: set[int] = set()
-    for idx, creep in enumerate(creeps):
+    for creep in creeps:
         if creep is target:
             continue
         if not getattr(creep, "alive", True):
             continue
-        if in_bounds_25 is None:
-            if not _creep_in_bounds(creep, width, height, margin=ROCKET_BOUNDS_MIN):
-                continue
-        else:
-            if idx >= len(in_bounds_25) or not in_bounds_25[idx]:
-                continue
+        if not _creep_in_bounds(creep, width, height, margin=ROCKET_BOUNDS_MIN):
+            continue
         dx = creep.x - target.x
         dy = creep.y - target.y
         if dx > RED_SPLASH_RADIUS or dx < -RED_SPLASH_RADIUS:
@@ -905,13 +885,14 @@ def _step_rockets(
     width: float,
     height: float,
     dt_scale: float,
-    *,
-    in_bounds_25: list[bool] | None = None,
 ) -> None:
     rockets = getattr(state, "rockets", [])
     if not rockets:
         return
     keep: list[RocketShot] = []
+
+    bounds_25: list[bool] | None = None
+    creeps_snapshot: list[Creep] | None = None
 
     for rocket in rockets:
         target = rocket.target
@@ -920,13 +901,22 @@ def _step_rockets(
 
         if rocket.kind == "rocket":
             if target is None:
+                if bounds_25 is None:
+                    creeps_snapshot = list(creeps)
+                    bounds_25 = [False] * len(creeps_snapshot)
+                    for idx, creep in enumerate(creeps_snapshot):
+                        x = float(creep.x)
+                        y = float(creep.y)
+                        bounds_25[idx] = (ROCKET_BOUNDS_MIN < x < width) and (
+                            ROCKET_BOUNDS_MIN < y < height
+                        )
                 target = _find_closest_creep(
                     rocket.x,
                     rocket.y,
-                    creeps,
+                    creeps_snapshot,
                     width,
                     height,
-                    in_bounds_25=in_bounds_25,
+                    in_bounds_25=bounds_25,
                 )
                 if target is None:
                     continue
