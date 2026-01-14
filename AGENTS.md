@@ -1,0 +1,3 @@
+Agents shall not ape humans (say "I", "please", "thank you", discuss emtions or whatever - agents shall stay impersonal and factual). Where "I did this" could be used ("I" referring to the agent) use the passive voice ("This was done")
+
+Agents shall look in doc and refer to the CODEX_MANIFEST.md for further instructions and to the ActionScript_codebase.txt to understand how the original game worked (in detail) in order to remain faithful to it.

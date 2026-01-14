@@ -5,6 +5,7 @@ from collections import deque
 import queue
 import threading
 import math
+import os
 from pathlib import Path
 import json
 import shutil
@@ -84,6 +85,63 @@ TARGET_MODE_LABELS = {
     "fastest": "FAST",
     "random": "RAND",
 }
+
+
+def _resolve_window_mode() -> str:
+    raw = os.getenv("VECTORTD_WINDOW_MODE", "").strip().lower()
+    if not raw:
+        return WINDOW_MODE
+    if raw in ("window", "windowed"):
+        return "windowed"
+    if raw in ("borderless", "exclusive"):
+        return raw
+    return WINDOW_MODE
+
+
+def _resolve_window_size() -> tuple[int, int] | None:
+    raw = os.getenv("VECTORTD_WINDOW_SIZE", "").strip().lower()
+    if not raw:
+        return None
+    if "x" in raw:
+        parts = raw.split("x", 1)
+    elif "," in raw:
+        parts = raw.split(",", 1)
+    else:
+        return None
+    try:
+        width = int(parts[0])
+        height = int(parts[1])
+    except ValueError:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def _resolve_window_screen() -> int | None:
+    raw = os.getenv("VECTORTD_WINDOW_SCREEN", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def _select_screen(index: int | None):
+    if index is None:
+        return None
+    try:
+        display = pyglet.display.get_display()
+        screens = display.get_screens()
+    except Exception:
+        return None
+    if 0 <= index < len(screens):
+        return screens[index]
+    return None
 
 
 @dataclass
@@ -318,6 +376,13 @@ class SimpleGui:
         self._ui_layout_height = self._logical_height / max(0.001, self._ui_scale)
         self._window_width = self._logical_width
         self._window_height = self._logical_height
+        self._window_mode = _resolve_window_mode()
+        self._window_resizable = self._window_mode == "windowed"
+        window_size = _resolve_window_size()
+        if window_size is not None and self._window_mode == "windowed":
+            self._window_width, self._window_height = window_size
+        self._window_screen_index = _resolve_window_screen()
+        self._window_screen = _select_screen(self._window_screen_index)
         self._base_view_scale = 1.0
         self._base_view_offset_x = 0.0
         self._base_view_offset_y = 0.0
@@ -386,21 +451,30 @@ class SimpleGui:
             self._load_auto_send_state()
             self._refresh_auto_wave_button()
 
-        fullscreen = WINDOW_MODE == "exclusive"
-        window_style = pyglet.window.Window.WINDOW_STYLE_BORDERLESS if WINDOW_MODE == "borderless" else pyglet.window.Window.WINDOW_STYLE_DEFAULT
+        fullscreen = self._window_mode == "exclusive"
+        window_style = (
+            pyglet.window.Window.WINDOW_STYLE_BORDERLESS
+            if self._window_mode == "borderless"
+            else pyglet.window.Window.WINDOW_STYLE_DEFAULT
+        )
         self.window = pyglet.window.Window(
             width=self._window_width,
             height=self._window_height,
             caption=f"VectorTD - {self.map_data.name}",
             fullscreen=fullscreen,
             style=window_style,
+            resizable=self._window_resizable,
+            screen=self._window_screen,
         )
         if self.window.fullscreen:
             self._window_width = self.window.width
             self._window_height = self.window.height
             self._update_view_transform()
         else:
-            self._set_window_to_screen()
+            if self._window_mode == "windowed":
+                self._center_window_on_screen()
+            else:
+                self._set_window_to_screen()
         self.batch = pyglet.graphics.Batch()
         self.ui_batch = pyglet.graphics.Batch()
         self.map_sprite = pyglet.sprite.Sprite(self.map_image, x=0, y=0, batch=self.batch)
@@ -2135,6 +2209,22 @@ class SimpleGui:
             return
         self.window.set_size(screen.width, screen.height)
         self.window.set_location(screen.x, screen.y)
+        self._window_width = self.window.width
+        self._window_height = self.window.height
+        self._update_view_transform()
+
+    def _center_window_on_screen(self) -> None:
+        screen = self.window.screen
+        if screen is None:
+            display = pyglet.canvas.get_display()
+            screen = display.get_default_screen()
+        if screen is None:
+            return
+        width = self.window.width
+        height = self.window.height
+        x = int(screen.x + max(0, (screen.width - width) / 2))
+        y = int(screen.y + max(0, (screen.height - height) / 2))
+        self.window.set_location(x, y)
         self._window_width = self.window.width
         self._window_height = self.window.height
         self._update_view_transform()

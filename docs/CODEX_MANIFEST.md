@@ -102,10 +102,6 @@ Tours “buff” (l’engine des buffs est surtout dans DefineSprite_525) :
 - `scripts/DefineSprite_141_tower_buff2/frame_1/DoAction.as`
 - `scripts/DefineSprite_145_tower_buff1/frame_1/DoAction.as`
 
-Conseil de progression (pour Codex) :
-- Implémenter d’abord 1 seule tour (ex: GREEN LASER 1) pour valider le pipeline : spawn → move → target → damage → kill → économie.
-- Puis ajouter les autres types (modes de ciblage, effets, buffs, etc.).
-
 ---
 
 ## 4) HANDLERS UI (optionnels si on remplace par une interface Python)
@@ -131,12 +127,7 @@ Ces scripts montrent comment le SWF déclenche les fonctions core, utile pour co
 ---
 
 ## 6) Tests (definitions JSON)
-Quand un nouveau test est fourni sous forme de définition JSON dans `data/tests` :
-- Créer ou mettre à jour un test Python dans `src/vectortd/tests` qui charge ce JSON et exécute le runner (pattern de `src/vectortd/tests/test_green_laser.py`).
-- Mettre à jour `.vscode/launch.json` → `inputs.testName.options` pour ajouter l'option du nouveau test.
-Notes :
-- Le GUI en mode test lit uniquement `data/tests`.
-- Le nom attendu par `--test` est le **nom de fichier sans extension** (ex: `data/tests/foo.json` → `--test foo`), pas le champ `"name"`.
+Cette section n'est plus pertinente.
 
 ## 7) Infos diverses
 
@@ -154,5 +145,4 @@ Chaque fois que nous ferons des découvertes concernant l'apprentissage IA (pas 
 Observation : l'agent place des tours dans des endroits éloignés des ennemis et qui restent inactives.
 Conséquence : argent perdu
 Solution : Mettre une récompense pour chaque cycle qu'une tour aura été active pendant une vague. Plus les tours placées sont actives, plus elles génèrent de récompense.
-
-ATTENTION c'est un exemple, ça ne veut pas dire que c'est une bonne idée !
+(ATTENTION c'est un exemple, ça ne veut pas dire que c'est une bonne idée !)

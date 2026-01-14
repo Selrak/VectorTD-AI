@@ -266,7 +266,9 @@ def main() -> int:
     ap.add_argument("--map", default="switchback")
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--num-envs", type=int, default=None)
-    ap.add_argument("--total-steps", type=int, default=50_000)
+    total_group = ap.add_mutually_exclusive_group()
+    total_group.add_argument("--total-steps", type=int, default=50_000)
+    total_group.add_argument("--total-time-hours", type=float, default=None)
     ap.add_argument("--rollout-steps", type=int, default=128)
     ap.add_argument("--max-build-actions", type=int, default=100)
     ap.add_argument("--device", default="cpu")
@@ -279,21 +281,26 @@ def main() -> int:
     ap.add_argument("--max-grad-norm", type=float, default=0.5)
     ap.add_argument("--update-epochs", type=int, default=4)
     ap.add_argument("--minibatch-size", type=int, default=256)
-    ap.add_argument("--checkpoint-every", type=int, default=10_000)
+    ap.add_argument("--checkpoint-every", type=int, default=50_000)
     ap.add_argument("--checkpoint-dir", default=None)
     ap.add_argument("--eval-every", type=int, default=10_000)
     ap.add_argument("--eval-episodes", type=int, default=1)
     ap.add_argument("--save-replay-every", type=int, default=0)
     ap.add_argument("--save-replay-count", type=int, default=10)
     ap.add_argument("--replay-dir", default=None)
-    ap.add_argument("--progress-interval-sec", type=float, default=60.0)
+    ap.add_argument("--progress-interval-sec", type=float, default=200.0)
     ap.add_argument("--plot-dashboard", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--pause", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--pause-key", default="space")
     args = ap.parse_args()
+    max_train_seconds = None
+    if args.total_time_hours is not None:
+        max_train_seconds = args.total_time_hours * 3600.0
 
     device = torch.device(args.device)
-    torch.set_num_threads(max(1, (os.cpu_count() or 1) - 1))
+    #torch.set_num_threads(max(1, (os.cpu_count() or 1) - 1))
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
     root_dir = _resolve_root()
     run_dir = _next_run_dir(root_dir)
     run_id = run_dir.name
@@ -346,23 +353,36 @@ def main() -> int:
     total_steps = 0
     last_log_time = time.perf_counter()
     train_start = time.perf_counter()
+
+    def _should_stop(current_steps: int) -> bool:
+        if max_train_seconds is not None:
+            return time.perf_counter() - train_start >= max_train_seconds
+        return current_steps >= args.total_steps
+
     update_idx = 0
     episodes_completed = 0
-    replay_interval = 0
+    replay_interval_steps = 0
+    replay_interval_sec = 0.0
     next_replay_step = 0
+    next_replay_time = 0.0
     pending_replay = False
     replays_saved = 0
     next_checkpoint_step = args.checkpoint_every if args.checkpoint_every > 0 else None
     next_eval_step = args.eval_every if args.eval_every > 0 else None
     if args.save_replay_every > 0:
-        replay_interval = args.save_replay_every
-    elif args.save_replay_count > 0 and args.total_steps > 0:
-        replay_interval = max(1, args.total_steps // args.save_replay_count)
-    if replay_interval > 0:
-        next_replay_step = replay_interval
+        replay_interval_steps = args.save_replay_every
+    elif args.save_replay_count > 0:
+        if max_train_seconds is not None:
+            replay_interval_sec = max_train_seconds / args.save_replay_count
+        elif args.total_steps > 0:
+            replay_interval_steps = max(1, args.total_steps // args.save_replay_count)
+    if replay_interval_steps > 0:
+        next_replay_step = replay_interval_steps
+    if replay_interval_sec > 0:
+        next_replay_time = replay_interval_sec
 
     try:
-        while total_steps < args.total_steps:
+        while not _should_stop(total_steps):
             pause.wait_if_paused()
             #print(f"update_start step={total_steps} update={update_idx + 1}")
             obs_buf = []
@@ -405,7 +425,7 @@ def main() -> int:
                     mask_list = vec.get_action_masks()
 
                 total_steps += vec.num_envs
-                if total_steps >= args.total_steps:
+                if _should_stop(total_steps):
                     break
 
             last_obs_tensor = batch_to_tensor(obs_list, max_towers=max_towers, slot_size=slot_size, device=device)
@@ -502,10 +522,14 @@ def main() -> int:
                 while next_checkpoint_step is not None and next_checkpoint_step <= total_steps:
                     next_checkpoint_step += args.checkpoint_every
 
-            if replay_interval > 0 and total_steps >= next_replay_step:
+            if replay_interval_steps > 0 and total_steps >= next_replay_step:
                 pending_replay = True
                 while next_replay_step <= total_steps:
-                    next_replay_step += replay_interval
+                    next_replay_step += replay_interval_steps
+            if replay_interval_sec > 0 and elapsed_sec >= next_replay_time:
+                pending_replay = True
+                while next_replay_time <= elapsed_sec:
+                    next_replay_time += replay_interval_sec
 
             did_eval = False
             if next_eval_step is not None and total_steps >= next_eval_step:
