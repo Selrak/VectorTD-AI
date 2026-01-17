@@ -18,3 +18,13 @@ def seed_state(state, seed: int | None) -> int:
 
 def get_state_seed(state) -> int:
     return int(getattr(state, "rng_state", 1))
+
+
+def rand_index(state, count: int) -> int:
+    if count <= 1:
+        return 0
+    seed = int(getattr(state, "rng_state", 1))
+    seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+    state.rng_state = seed
+    state.rng_calls = int(getattr(state, "rng_calls", 0)) + 1
+    return seed % count

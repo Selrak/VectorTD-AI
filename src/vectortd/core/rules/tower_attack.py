@@ -5,6 +5,7 @@ import math
 import time
 
 from ..model.entities import Creep, Tower, PulseShot, RocketShot
+from ..rng import rand_index
 
 SHOT_FLASH_FRAMES = 2.0
 BLUE_SHOT_FRAMES = 5.0
@@ -414,7 +415,7 @@ def _choose_by_mode(
     state,
 ) -> Creep:
     if mode == "random":
-        return candidates[_rand_index(state, len(candidates))]
+        return candidates[rand_index(state, len(candidates))]
 
     qualifier = 0.0
     chosen: Creep | None = None
@@ -595,8 +596,8 @@ def _apply_red_refractor_hit(
             (
                 float(target.x),
                 float(target.y),
-                float(creep.x + _rand_index(state, 10) - 5),
-                float(creep.y + _rand_index(state, 10) - 5),
+                float(creep.x),
+                float(creep.y),
             )
         )
 
@@ -625,10 +626,10 @@ def _fire_red_spammer(
     candidates = _creeps_in_range(tower, creeps, width, height, grid)
     if not candidates:
         return
-    target = candidates[_rand_index(state, len(candidates))]
+    target = candidates[rand_index(state, len(candidates))]
     cell_size = max(1, int(round(grid)))
-    origin_x = float(tower.cell_x + _rand_index(state, cell_size))
-    origin_y = float(tower.cell_y + _rand_index(state, cell_size))
+    origin_x = float(tower.cell_x + rand_index(state, cell_size))
+    origin_y = float(tower.cell_y + rand_index(state, cell_size))
     _spawn_swarm_rocket(state, target, origin_x, origin_y, float(tower.damage))
 
 
@@ -1061,12 +1062,3 @@ def _kill_creep(state, target: Creep) -> None:
         if ups is not None:
             state.ups = int(ups) + 1
 
-
-def _rand_index(state, count: int) -> int:
-    if count <= 1:
-        return 0
-    seed = int(getattr(state, "rng_state", 1))
-    seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
-    state.rng_state = seed
-    state.rng_calls = int(getattr(state, "rng_calls", 0)) + 1
-    return seed % count

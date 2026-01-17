@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections import deque
+import random
 import queue
 import threading
 import math
@@ -415,6 +416,7 @@ class SimpleGui:
         self.tower_sprites: List[pyglet.sprite.Sprite] = []
         self._tower_sprite_ids: list[int] = []
         self._tower_shot_lines: list[list[pyglet.shapes.Line]] = []
+        self._tower_shot_jitter: list[tuple[int, list[tuple[float, float, float, float]]] | None] = []
         self._tower_level_tags: list[tuple[pyglet.shapes.BorderedRectangle, pyglet.text.Label]] = []
         self._tower_level_tag_base = 12
         self._tower_level_font_base = _scaled_font(9)
@@ -611,6 +613,7 @@ class SimpleGui:
         self.tower_sprites = []
         self._tower_level_tags = []
         self._tower_shot_lines = []
+        self._tower_shot_jitter = []
         self._tower_sprite_ids = []
 
     def _sync_tower_sprites(self) -> None:
@@ -669,6 +672,7 @@ class SimpleGui:
                     line.opacity = 0
                     lines.append(line)
                 self._tower_shot_lines.append(lines)
+                self._tower_shot_jitter.append(None)
 
         for (sprite, tower), (tag_rect, tag_label) in zip(
             zip(self.tower_sprites, towers),
@@ -693,14 +697,34 @@ class SimpleGui:
         towers = self.state.towers
         if not self._tower_shot_lines:
             return
-        grid = float(self.map_data.grid)
-        for lines, tower in zip(self._tower_shot_lines, towers):
+        for slot_idx, (lines, tower) in enumerate(zip(self._tower_shot_lines, towers)):
             segments = tower.shot_segments if tower.shot_timer > 0.0 else []
+            segments_to_draw = segments
+            if segments and tower.kind == "red_refractor":
+                # Refractor splash lines jitter in the SWF; keep it visual-only here.
+                cache = self._tower_shot_jitter[slot_idx]
+                seg_id = id(segments)
+                if cache is None or cache[0] != seg_id:
+                    jittered = [segments[0]]
+                    for x1, y1, x2, y2 in segments[1:]:
+                        jittered.append(
+                            (
+                                x1,
+                                y1,
+                                x2 + random.randrange(10) - 5,
+                                y2 + random.randrange(10) - 5,
+                            )
+                        )
+                    cache = (seg_id, jittered)
+                    self._tower_shot_jitter[slot_idx] = cache
+                segments_to_draw = cache[1]
+            else:
+                self._tower_shot_jitter[slot_idx] = None
             for idx, line in enumerate(lines):
-                if idx >= len(segments):
+                if idx >= len(segments_to_draw):
                     line.opacity = 0
                     continue
-                x1, y1, x2, y2 = segments[idx]
+                x1, y1, x2, y2 = segments_to_draw[idx]
                 line.x = self._world_draw_x(x1)
                 line.y = self._world_draw_y(y1)
                 line.x2 = self._world_draw_x(x2)
