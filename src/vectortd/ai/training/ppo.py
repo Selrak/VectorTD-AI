@@ -12,33 +12,7 @@ try:
 except Exception as exc:  # pragma: no cover - import guard
     raise ImportError("PyTorch is required for PPO training. Install torch and retry.") from exc
 
-
-SCALAR_KEYS = (
-    "bank_norm",
-    "lives_norm",
-    "score_norm",
-    "wave_norm",
-    "interest_norm",
-    "base_hp_norm",
-    "base_worth_norm",
-    "tower_count_norm",
-    "wave_current_present",
-    "wave_current_type_norm",
-    "wave_current_hp_norm",
-    "wave_next_present",
-    "wave_next_type_norm",
-    "wave_next_hp_norm",
-)
-
-
-def flatten_observation(obs: dict, *, max_towers: int, slot_size: int) -> list[float]:
-    values: list[float] = [float(obs.get(key, 0.0) or 0.0) for key in SCALAR_KEYS]
-    tower_slots = obs.get("tower_slots", []) or []
-    empty_slot = [0.0] * slot_size
-    for idx in range(max_towers):
-        slot = tower_slots[idx] if idx < len(tower_slots) else empty_slot
-        values.extend(float(value) for value in slot)
-    return values
+from vectortd.ai.obs_flatten import SCALAR_KEYS, flatten_observation
 
 
 def batch_to_tensor(
@@ -48,7 +22,14 @@ def batch_to_tensor(
     slot_size: int,
     device: torch.device,
 ) -> torch.Tensor:
-    data = [flatten_observation(obs, max_towers=max_towers, slot_size=slot_size) for obs in obs_batch]
+    obs_list = list(obs_batch)
+    if not obs_list:
+        return torch.empty((0,), dtype=torch.float32, device=device)
+    first = obs_list[0]
+    if isinstance(first, dict):
+        data = [flatten_observation(obs, max_towers=max_towers, slot_size=slot_size) for obs in obs_list]
+    else:
+        data = obs_list
     return torch.tensor(data, dtype=torch.float32, device=device)
 
 

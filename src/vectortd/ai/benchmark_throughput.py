@@ -129,7 +129,7 @@ def _populate_towers(state, map_data, tower_kinds: list[str], tower_count: int, 
 
 def _run_single(args) -> tuple[dict[str, Any], dict[str, Any]]:
     env = VectorTDEventEnv(max_build_actions=args.max_build_actions, timing_enabled=True)
-    obs = env.reset(map_path=args.map, seed=args.seed)
+    env.reset(seed=args.seed, options={"map_path": args.map})
     rng = random.Random(args.seed)
     start_time = time.perf_counter()
     steps = 0
@@ -139,14 +139,15 @@ def _run_single(args) -> tuple[dict[str, Any], dict[str, Any]]:
 
     for _ in range(args.steps):
         action = _choose_action(args.action, rng)
-        obs, _, done, info = env.step(action)
+        _, _, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
         steps += 1
         if "wave_ticks" in info:
             waves += 1
             wave_ticks_total += int(info.get("wave_ticks") or 0)
         if done and args.reset_on_done:
             resets += 1
-            obs = env.reset(map_path=args.map, seed=args.seed + resets)
+            env.reset(seed=args.seed + resets, options={"map_path": args.map})
     elapsed = time.perf_counter() - start_time
     timing = env.get_timing_snapshot()
     stats = {
@@ -303,12 +304,13 @@ def _init_policy(args, *, map_name: str):
     from vectortd.ai.training.ppo import PPOAgent, PPOConfig, SCALAR_KEYS
 
     probe_env = VectorTDEventEnv(max_build_actions=args.max_build_actions)
-    obs = probe_env.reset(map_path=map_name, seed=args.seed)
+    probe_env.reset(seed=args.seed, options={"map_path": map_name})
     if probe_env.action_spec is None:
         raise RuntimeError("Missing action spec after reset")
     action_dim = probe_env.action_spec.num_actions
-    slot_size = len(obs.get("tower_slot_features", []) or [])
-    max_towers = len(obs.get("tower_slots", []) or [])
+    obs_dict = probe_env.last_obs or {}
+    slot_size = len(obs_dict.get("tower_slot_features", []) or [])
+    max_towers = len(obs_dict.get("tower_slots", []) or [])
     obs_dim = len(SCALAR_KEYS) + max_towers * slot_size
     device = torch.device(args.device)
     config = PPOConfig(
@@ -332,7 +334,7 @@ def _run_policy_single(args) -> tuple[dict[str, Any], dict[str, Any]]:
 
     agent, obs_dim, action_dim, slot_size, max_towers, device = _init_policy(args, map_name=args.map)
     env = VectorTDEventEnv(max_build_actions=args.max_build_actions, timing_enabled=True)
-    obs = env.reset(map_path=args.map, seed=args.seed)
+    obs, _ = env.reset(seed=args.seed, options={"map_path": args.map})
     rng = random.Random(args.seed)
     start_time = time.perf_counter()
     policy_time = 0.0
@@ -343,7 +345,7 @@ def _run_policy_single(args) -> tuple[dict[str, Any], dict[str, Any]]:
     resets = 0
 
     for _ in range(args.steps):
-        mask = env.get_action_mask()
+        mask = env.action_masks()
         obs_tensor = batch_to_tensor([obs], max_towers=max_towers, slot_size=slot_size, device=device)
         mask_tensor = _mask_list_to_tensor([mask], device=device, torch=torch)
         t0 = time.perf_counter()
@@ -351,14 +353,15 @@ def _run_policy_single(args) -> tuple[dict[str, Any], dict[str, Any]]:
         policy_time += time.perf_counter() - t0
         policy_calls += 1
         action = int(actions.item())
-        obs, _, done, info = env.step(action)
+        obs, _, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
         steps += 1
         if "wave_ticks" in info:
             waves += 1
             wave_ticks_total += int(info.get("wave_ticks") or 0)
         if done and args.reset_on_done:
             resets += 1
-            obs = env.reset(map_path=args.map, seed=args.seed + resets)
+            obs, _ = env.reset(seed=args.seed + resets, options={"map_path": args.map})
     elapsed = time.perf_counter() - start_time
     timing = env.get_timing_snapshot()
     stats = {

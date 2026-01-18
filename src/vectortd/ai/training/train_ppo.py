@@ -299,12 +299,13 @@ def main() -> int:
     run_id = run_dir.name
 
     probe_env = VectorTDEventEnv(max_build_actions=args.max_build_actions)
-    first_obs = probe_env.reset(map_path=args.map, seed=args.seed)
+    probe_env.reset(seed=args.seed, options={"map_path": args.map})
     if probe_env.action_spec is None:
         raise RuntimeError("Missing action spec after reset")
     action_dim = probe_env.action_spec.num_actions
-    slot_size = len(first_obs.get("tower_slot_features", []) or [])
-    max_towers = len(first_obs.get("tower_slots", []) or [])
+    obs_dict = probe_env.last_obs or {}
+    slot_size = len(obs_dict.get("tower_slot_features", []) or [])
+    max_towers = len(obs_dict.get("tower_slots", []) or [])
     obs_dim = len(SCALAR_KEYS) + max_towers * slot_size
 
     config = PPOConfig(
@@ -527,7 +528,10 @@ def main() -> int:
                     pause.wait_if_paused()
                     collect_checks = pending_replay and eval_idx == (args.eval_episodes - 1)
                     state_checks: list[dict] | None = [] if collect_checks else None
-                    obs = eval_env.reset(map_path=args.map, seed=args.seed + 1000 + eval_idx)
+                    obs, _ = eval_env.reset(
+                        seed=args.seed + 1000 + eval_idx,
+                        options={"map_path": args.map},
+                    )
                     done = False
                     episode_return = 0.0
                     actions = 0
@@ -538,7 +542,7 @@ def main() -> int:
                     while not done:
                         pause.wait_if_paused()
                         obs_tensor = batch_to_tensor([obs], max_towers=max_towers, slot_size=slot_size, device=device)
-                        mask_tensor = _to_mask_tensor([eval_env.get_action_mask()], device=device)
+                        mask_tensor = _to_mask_tensor([eval_env.action_masks()], device=device)
                         action, _, _ = agent.act(obs_tensor, mask_tensor, deterministic=True)
                         action_id = int(action.item())
                         is_start_wave = _is_start_wave(action_id, eval_env)
@@ -555,7 +559,8 @@ def main() -> int:
                                 eval_env.action_spec,
                                 wave_ticks=0,
                             )
-                        obs, reward, done, info = eval_env.step(action_id)
+                        obs, reward, terminated, truncated, info = eval_env.step(action_id)
+                        done = terminated or truncated
                         episode_return += float(reward)
                         actions += 1
                         steps += 1
@@ -663,13 +668,13 @@ def main() -> int:
             if pending_replay and not did_eval:
                 replay_env = VectorTDEventEnv(max_build_actions=args.max_build_actions)
                 replay_seed = args.seed + 2000 + replays_saved
-                obs = replay_env.reset(map_path=args.map, seed=replay_seed)
+                obs, _ = replay_env.reset(seed=replay_seed, options={"map_path": args.map})
                 done = False
                 state_checks: list[dict] | None = []
                 while not done:
                     pause.wait_if_paused()
                     obs_tensor = batch_to_tensor([obs], max_towers=max_towers, slot_size=slot_size, device=device)
-                    mask_tensor = _to_mask_tensor([replay_env.get_action_mask()], device=device)
+                    mask_tensor = _to_mask_tensor([replay_env.action_masks()], device=device)
                     action, _, _ = agent.act(obs_tensor, mask_tensor, deterministic=True)
                     action_id = int(action.item())
                     is_start_wave = _is_start_wave(action_id, replay_env)
@@ -685,7 +690,8 @@ def main() -> int:
                             replay_env.action_spec,
                             wave_ticks=0,
                         )
-                    obs, _, done, info = replay_env.step(action_id)
+                    obs, _, terminated, truncated, info = replay_env.step(action_id)
+                    done = terminated or truncated
                     if "wave_ticks" in info and pre_check is not None:
                         _maybe_record_state_check(
                             state_checks,

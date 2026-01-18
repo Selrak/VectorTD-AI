@@ -25,7 +25,7 @@ def _expand(values, count: int, default):
 
 @dataclass
 class StepResult:
-    obs: dict[str, Any]
+    obs: Any
     reward: float
     done: bool
     info: dict[str, Any]
@@ -38,14 +38,14 @@ def _worker(conn, env_kwargs: dict[str, Any]) -> None:
         if cmd == "reset":
             map_path = payload.get("map_path")
             seed = payload.get("seed")
-            obs = env.reset(map_path=map_path, seed=seed)
+            obs, _ = env.reset(seed=seed, options={"map_path": map_path})
             conn.send(("ok", obs))
         elif cmd == "step":
             action = payload.get("action")
-            obs, reward, done, info = env.step(action)
-            conn.send(("ok", (obs, reward, done, info)))
+            obs, reward, terminated, truncated, info = env.step(action)
+            conn.send(("ok", (obs, reward, terminated or truncated, info)))
         elif cmd == "mask":
-            mask = env.get_action_mask()
+            mask = env.action_masks()
             conn.send(("ok", mask))
         elif cmd == "close":
             conn.send(("ok", None))
@@ -83,14 +83,14 @@ class VectorizedEnv:
             self._pipes.append(parent)
             self._procs.append(proc)
 
-    def reset(self, *, map_paths=None, seeds=None) -> list[dict[str, Any]]:
+    def reset(self, *, map_paths=None, seeds=None) -> list[Any]:
         map_list = _expand(map_paths, self.num_envs, None)
         seed_list = _expand(seeds, self.num_envs, None)
         for pipe, map_path, seed in zip(self._pipes, map_list, seed_list):
             pipe.send(("reset", {"map_path": map_path, "seed": seed}))
         return [self._recv(pipe) for pipe in self._pipes]
 
-    def reset_at(self, indices: list[int], *, map_paths=None, seeds=None) -> list[dict[str, Any]]:
+    def reset_at(self, indices: list[int], *, map_paths=None, seeds=None) -> list[Any]:
         if not indices:
             return []
         for idx in indices:

@@ -56,11 +56,12 @@ def _probe_dims(
     max_wave_ticks: int,
 ) -> tuple[int, int, int, int]:
     env = VectorTDEventEnv(max_build_actions=max_build_actions, max_wave_ticks=max_wave_ticks)
-    obs = env.reset(map_path=map_name, seed=1)
+    env.reset(seed=1, options={"map_path": map_name})
     if env.action_spec is None:
         raise RuntimeError("Missing action spec after reset")
-    max_towers = len(obs.get("tower_slots", []) or [])
-    slot_size = len(obs.get("tower_slot_features", []) or [])
+    obs_dict = env.last_obs or {}
+    max_towers = len(obs_dict.get("tower_slots", []) or [])
+    slot_size = len(obs_dict.get("tower_slot_features", []) or [])
     obs_dim = len(SCALAR_KEYS) + max_towers * slot_size
     action_dim = env.action_spec.num_actions
     env.close()
@@ -89,12 +90,12 @@ def _run_replay_episode(
     max_wave_ticks: int,
 ) -> Replay:
     env = VectorTDEventEnv(max_build_actions=max_build_actions, max_wave_ticks=max_wave_ticks)
-    obs = env.reset(map_path=map_name, seed=seed)
+    obs, _ = env.reset(seed=seed, options={"map_path": map_name})
     state_checks: list[dict] = []
     done = False
     with torch.no_grad():
         while not done:
-            mask = env.get_action_mask()
+            mask = env.action_masks()
             obs_tensor = batch_to_tensor([obs], max_towers=max_towers, slot_size=slot_size, device=device)
             mask_tensor = _to_mask_tensor([mask], device=device)
             action, _, _ = agent.act(obs_tensor, mask_tensor, deterministic=True)
@@ -111,7 +112,8 @@ def _run_replay_episode(
                     env.action_spec,
                     wave_ticks=0,
                 )
-            obs, _, done, info = env.step(action_id)
+            obs, _, terminated, truncated, info = env.step(action_id)
+            done = terminated or truncated
             if pre_check is not None and "wave_ticks" in info:
                 wave_idx = max(0, len(env.episode_actions) - 1)
                 post_check = build_state_check(

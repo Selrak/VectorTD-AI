@@ -62,14 +62,14 @@ def run_episode(
     verbose: bool,
 ) -> EpisodeResult:
     env = VectorTDEventEnv(max_build_actions=max_build_actions)
-    env.reset(map_path=map_name, seed=seed)
+    env.reset(seed=seed, options={"map_path": map_name})
     policy = make_policy(policy_name, seed=seed, verbose=verbose)
     policy.reset(env)
 
     steps = 0
     waves = 0
     done = False
-    obs: dict | None = None
+    obs_dict: dict | None = None
     stop_reason = "max_steps"
 
     while not done and steps < max_steps:
@@ -80,7 +80,9 @@ def run_episode(
         if action is None:
             action = Noop()
         is_start_wave = _is_start_wave(action, env)
-        obs, _, done, info = env.step(action)
+        _, _, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        obs_dict = env.last_obs
         steps += 1
         if is_start_wave:
             waves += 1
@@ -92,19 +94,19 @@ def run_episode(
                     seed,
                     waves,
                     info.get("wave_ticks"),
-                    obs.get("lives"),
-                    obs.get("score"),
-                    obs.get("bank"),
+                    (obs_dict or {}).get("lives"),
+                    (obs_dict or {}).get("score"),
+                    (obs_dict or {}).get("bank"),
                 )
 
     if done:
         stop_reason = "done"
-    if obs is None:
-        obs = {}
+    if obs_dict is None:
+        obs_dict = {}
     if env.engine is None:
         game_over = False
         game_won = False
-        final_wave = int(obs.get("wave", 0) or 0)
+        final_wave = int(obs_dict.get("wave", 0) or 0)
     else:
         state = env.engine.state
         game_over = bool(getattr(state, "game_over", False))
@@ -116,9 +118,9 @@ def run_episode(
         seed=seed,
         steps=steps,
         waves=waves,
-        score=int(obs.get("score", 0) or 0),
-        lives=int(obs.get("lives", 0) or 0),
-        bank=int(obs.get("bank", 0) or 0),
+        score=int(obs_dict.get("score", 0) or 0),
+        lives=int(obs_dict.get("lives", 0) or 0),
+        bank=int(obs_dict.get("bank", 0) or 0),
         final_wave=final_wave,
         game_over=game_over,
         game_won=game_won,

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from vectortd.ai.actions import Noop, StartWave
 from vectortd.ai.env import VectorTDEventEnv
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Transition:
-    obs: dict
+    obs: Any
     action: object
     reward: float
     done: bool
@@ -157,14 +157,14 @@ def _run_episode(
     collect_state_checks: bool = False,
     pause: PauseController | None = None,
 ) -> tuple[EpisodeSummary, list[Transition], list[dict] | None]:
-    env.reset(map_path=map_name, seed=seed)
+    env.reset(seed=seed, options={"map_path": map_name})
     policy.reset(env)
 
     steps = 0
     waves = 0
     done = False
     total_reward = 0.0
-    obs: dict | None = None
+    obs_dict: dict | None = None
     stop_reason = "max_steps"
     rollout: list[Transition] = []
     state_checks: list[dict] | None = [] if collect_state_checks else None
@@ -192,7 +192,9 @@ def _run_episode(
                 env.action_spec,
                 wave_ticks=0,
             )
-        obs, reward, done, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        obs_dict = env.last_obs
         steps += 1
         total_reward += float(reward)
         did_wave = "wave_ticks" in info
@@ -227,8 +229,8 @@ def _run_episode(
 
     if done:
         stop_reason = "done"
-    if obs is None:
-        obs = {}
+    if obs_dict is None:
+        obs_dict = {}
     if env.engine is None:
         game_over = False
         game_won = False
@@ -243,9 +245,9 @@ def _run_episode(
         steps=steps,
         waves=waves,
         total_reward=total_reward,
-        score=int(obs.get("score", 0) or 0),
-        lives=int(obs.get("lives", 0) or 0),
-        bank=int(obs.get("bank", 0) or 0),
+        score=int(obs_dict.get("score", 0) or 0),
+        lives=int(obs_dict.get("lives", 0) or 0),
+        bank=int(obs_dict.get("bank", 0) or 0),
         game_over=game_over,
         game_won=game_won,
         stop_reason=stop_reason,

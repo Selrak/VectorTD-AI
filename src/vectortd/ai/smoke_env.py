@@ -239,7 +239,7 @@ def main() -> int:
     _configure_logging(verbose=args.verbose, log_dir=log_dir)
 
     env = VectorTDEventEnv(max_build_actions=args.max_build_actions)
-    env.reset(map_path=args.map, seed=args.seed)
+    env.reset(seed=args.seed, options={"map_path": args.map})
 
     policy = make_policy(args.policy, seed=args.seed, verbose=args.verbose)
     policy.reset(env)
@@ -248,7 +248,7 @@ def main() -> int:
     steps = 0
     waves = 0
     done = False
-    obs: dict | None = None
+    obs_dict: dict | None = None
 
     while not done and steps < args.max_steps:
         if args.max_waves is not None and waves >= args.max_waves:
@@ -272,7 +272,9 @@ def main() -> int:
                 wave_ticks=0,
             )
 
-        obs, _, done, info = env.step(action)
+        _, _, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        obs_dict = env.last_obs
         steps += 1
 
         if is_start_wave:
@@ -282,10 +284,10 @@ def main() -> int:
                     "wave done: ticks=%s timeout=%s lives=%s score=%s bank=%s wave=%s",
                     info.get("wave_ticks"),
                     info.get("timeout"),
-                    obs.get("lives"),
-                    obs.get("score"),
-                    obs.get("bank"),
-                    obs.get("wave"),
+                    (obs_dict or {}).get("lives"),
+                    (obs_dict or {}).get("score"),
+                    (obs_dict or {}).get("bank"),
+                    (obs_dict or {}).get("wave"),
                 )
             if pre_check is not None and env.engine is not None and env.action_spec is not None:
                 wave_idx = max(0, len(env.episode_actions) - 1)
@@ -310,12 +312,12 @@ def main() -> int:
             logger.info("all upgrades complete after %s steps", steps)
             break
 
-    if obs is None:
-        obs = {}
+    if obs_dict is None:
+        obs_dict = {}
     summary = (
         f"summary: steps={steps} waves={waves} "
-        f"wave={obs.get('wave')} lives={obs.get('lives')} "
-        f"score={obs.get('score')} bank={obs.get('bank')} done={done}"
+        f"wave={obs_dict.get('wave')} lives={obs_dict.get('lives')} "
+        f"score={obs_dict.get('score')} bank={obs_dict.get('bank')} done={done}"
     )
     if args.verbose:
         logger.info(summary)
