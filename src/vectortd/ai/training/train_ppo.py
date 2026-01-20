@@ -14,6 +14,8 @@ except Exception as exc:  # pragma: no cover - import guard
     raise SystemExit("PyTorch is required for PPO training. Install torch and retry.") from exc
 
 from vectortd.ai.env import VectorTDEventEnv
+from vectortd.ai.run_metadata import write_run_metadata
+from vectortd.ai.run_summary import write_run_summary
 from vectortd.ai.vectorized_env import VectorizedEnv
 from vectortd.ai.training.ppo import (
     PPOAgent,
@@ -329,6 +331,41 @@ def main() -> int:
     obs_list = vec.reset(map_paths=args.map, seeds=seeds)
     mask_list = vec.get_action_masks()
 
+    training_meta = {
+        "map": args.map,
+        "seed": args.seed,
+        "num_envs": vec.num_envs,
+        "rollout_steps": args.rollout_steps,
+        "total_steps": args.total_steps,
+        "eval_every": args.eval_every,
+        "eval_episodes": args.eval_episodes,
+        "checkpoint_every": args.checkpoint_every,
+        "save_replay_every": args.save_replay_every,
+        "save_replay_count": args.save_replay_count,
+        "max_build_actions": args.max_build_actions,
+        "obs_dim": obs_dim,
+        "action_dim": action_dim,
+        "max_towers": max_towers,
+        "slot_size": slot_size,
+    }
+    algorithm_meta = {
+        "name": "vectortd_ppo",
+        "implementation": "vectortd.ai.training.ppo",
+        "torch_version": getattr(torch, "__version__", "unknown"),
+        "device": str(device),
+        "hyperparams": {
+            "learning_rate": config.learning_rate,
+            "gamma": config.gamma,
+            "gae_lambda": config.gae_lambda,
+            "clip_range": config.clip_range,
+            "value_coef": config.value_coef,
+            "entropy_coef": config.entropy_coef,
+            "max_grad_norm": config.max_grad_norm,
+            "update_epochs": config.update_epochs,
+            "minibatch_size": config.minibatch_size,
+        },
+    }
+
     checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else run_dir / "checkpoints"
     replay_dir = Path(args.replay_dir) if args.replay_dir else run_dir / "replays"
     train_log_path = run_dir / "train_log.csv"
@@ -341,6 +378,13 @@ def main() -> int:
     sys.stdout = _Tee(stdout_orig, log_handle)
     sys.stderr = _Tee(stderr_orig, log_handle)
     print(f"run_dir={run_dir}")
+    run_metadata_path = write_run_metadata(
+        run_dir,
+        total_timesteps=args.total_steps,
+        training=training_meta,
+        algorithm=algorithm_meta,
+    )
+    print(f"run_metadata={run_metadata_path} total_timesteps={args.total_steps} step_unit=timesteps")
     pause = PauseController(enabled=args.pause, key=normalize_pause_key(args.pause_key))
     pause.start()
 
@@ -362,6 +406,7 @@ def main() -> int:
     if replay_interval > 0:
         next_replay_step = replay_interval
 
+    error_info = None
     try:
         while total_steps < args.total_steps:
             pause.wait_if_paused()
@@ -709,7 +754,30 @@ def main() -> int:
         if args.plot_dashboard:
             _run_dashboard(train_log_path, eval_log_path, map_name=args.map, out_dir=run_dir / "dashboard")
         return 0
+    except BaseException as exc:
+        error_info = {"type": type(exc).__name__, "message": str(exc)}
+        raise
     finally:
+        write_run_metadata(
+            run_dir,
+            total_timesteps=args.total_steps,
+            training={"actual_timesteps": total_steps},
+        )
+        try:
+            log_handle.flush()
+        except Exception:
+            pass
+        try:
+            write_run_summary(
+                run_dir,
+                algorithm="vectortd_ppo",
+                console_log=console_log_path,
+                train_log_csv=train_log_path,
+                eval_log_csv=eval_log_path,
+                error=error_info,
+            )
+        except Exception:
+            pass
         pause.stop()
         sys.stdout = stdout_orig
         sys.stderr = stderr_orig

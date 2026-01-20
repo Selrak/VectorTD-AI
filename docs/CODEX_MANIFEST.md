@@ -156,3 +156,7 @@ Conséquence : argent perdu
 Solution : Mettre une récompense pour chaque cycle qu'une tour aura été active pendant une vague. Plus les tours placées sont actives, plus elles génèrent de récompense.
 
 ATTENTION c'est un exemple, ça ne veut pas dire que c'est une bonne idée !
+
+SMP fera référence à "Stable Baselines 3 (Contrib) MaskablePPO".
+
+On n'oubliera pas, lors de développement de nouvelles fonctioannlités d'entraînement ou autres modifications (logging, etc.) d'ajouter à run_metadata ou run_summary ce qui est pertinent de l'être.

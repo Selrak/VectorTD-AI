@@ -6,9 +6,12 @@ import os
 from pathlib import Path
 import sys
 import time
+import numpy as np
 
 try:
     import torch
+    import sb3_contrib
+    import stable_baselines3 as sb3
     from sb3_contrib import MaskablePPO
     from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
     from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
@@ -20,6 +23,8 @@ except Exception as exc:  # pragma: no cover - import guard
     ) from exc
 
 from vectortd.ai.env import VectorTDEventEnv
+from vectortd.ai.run_metadata import write_run_metadata
+from vectortd.ai.run_summary import write_run_summary
 
 
 def _resolve_root() -> Path:
@@ -53,6 +58,53 @@ def _default_num_envs() -> int:
     return max(1, cpu_count - 1)
 
 
+def _read_cpu_max_freq_khz(cpu_id: int) -> int | None:
+    cpu_dir = Path("/sys/devices/system/cpu") / f"cpu{cpu_id}" / "cpufreq"
+    for name in ("cpuinfo_max_freq", "scaling_max_freq"):
+        path = cpu_dir / name
+        if not path.exists():
+            continue
+        try:
+            return int(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def _detect_p_core_cpus() -> list[int]:
+    cpu_root = Path("/sys/devices/system/cpu")
+    cpu_ids: list[int] = []
+    for entry in cpu_root.iterdir():
+        name = entry.name
+        if name.startswith("cpu") and name[3:].isdigit():
+            cpu_ids.append(int(name[3:]))
+    cpu_ids.sort()
+    freq_by_cpu: dict[int, int] = {}
+    for cpu_id in cpu_ids:
+        freq = _read_cpu_max_freq_khz(cpu_id)
+        if freq is not None:
+            freq_by_cpu[cpu_id] = freq
+    if not freq_by_cpu:
+        return []
+    max_freq = max(freq_by_cpu.values())
+    if max_freq <= 0:
+        return []
+    threshold = int(max_freq * 0.95)
+    return sorted([cpu_id for cpu_id, freq in freq_by_cpu.items() if freq >= threshold])
+
+
+def _maybe_set_affinity(cpu_ids: list[int]) -> bool:
+    if not cpu_ids:
+        return False
+    if not hasattr(os, "sched_setaffinity"):
+        return False
+    try:
+        os.sched_setaffinity(0, set(cpu_ids))
+    except OSError:
+        return False
+    return True
+
+
 def _pause_if_requested(run_dir: Path, *, poll_sec: float = 2.0) -> None:
     pause_path = run_dir / "PAUSE"
     while pause_path.exists():
@@ -83,7 +135,6 @@ class _Tee:
     def write(self, data: str) -> int:
         for stream in self._streams:
             stream.write(data)
-            stream.flush()
         return len(data)
 
     def flush(self) -> None:
@@ -102,8 +153,13 @@ def make_train_env(
     run_dir: str,
     max_build_actions: int,
     max_wave_ticks: int,
+    cpu_id: int | None,
+    log_interval_sec: float,
+    debug_actions: bool,
 ):
     def _init():
+        if cpu_id is not None:
+            _maybe_set_affinity([cpu_id])
         log_dir = Path(run_dir) / "console"
         env = VectorTDEventEnv(
             default_map=map_path,
@@ -111,7 +167,8 @@ def make_train_env(
             max_wave_ticks=max_wave_ticks,
             log_dir=log_dir,
             log_prefix=f"train_{rank}",
-            log_interval_sec=10.0,
+            log_interval_sec=log_interval_sec,
+            debug_actions=debug_actions,
         )
         env._initial_seed = base_seed + rank
         monitor_dir = Path(run_dir) / "monitor" / "train"
@@ -130,8 +187,12 @@ def make_eval_env(
     run_dir: str,
     max_build_actions: int,
     max_wave_ticks: int,
+    cpu_id: int | None,
+    debug_actions: bool,
 ):
     def _init():
+        if cpu_id is not None:
+            _maybe_set_affinity([cpu_id])
         log_dir = Path(run_dir) / "console"
         env = VectorTDEventEnv(
             default_map=map_path,
@@ -139,7 +200,8 @@ def make_eval_env(
             max_wave_ticks=max_wave_ticks,
             log_dir=log_dir,
             log_prefix=f"eval_{rank}",
-            log_interval_sec=10.0,
+            log_interval_sec=0.0,
+            debug_actions=debug_actions,
         )
         env._initial_seed = base_seed + rank
         monitor_dir = Path(run_dir) / "monitor" / "eval"
@@ -203,6 +265,104 @@ class BestReplayCallback(BaseCallback):
         replay_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+class DebugInvalidActionCallback(BaseCallback):
+    def __init__(self, *, log_interval_steps: int = 2048) -> None:
+        super().__init__(verbose=0)
+        self.log_interval_steps = int(log_interval_steps)
+        self._next_log_step = int(log_interval_steps)
+        self._window_total = 0
+        self._window_invalid = 0
+        self._total_total = 0
+        self._total_invalid = 0
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos") if self.locals is not None else None
+        if infos:
+            for info in infos:
+                self._total_total += 1
+                self._window_total += 1
+                if info.get("invalid_action"):
+                    self._total_invalid += 1
+                    self._window_invalid += 1
+        if self.num_timesteps >= self._next_log_step:
+            window_rate = self._window_invalid / self._window_total if self._window_total else 0.0
+            total_rate = self._total_invalid / self._total_total if self._total_total else 0.0
+            print(
+                "debug_invalid_action_rate={:.4f} window_invalid={} window_total={} total_invalid={} total_total={} steps={}".format(
+                    window_rate,
+                    self._window_invalid,
+                    self._window_total,
+                    self._total_invalid,
+                    self._total_total,
+                    self.num_timesteps,
+                )
+            )
+            self._window_total = 0
+            self._window_invalid = 0
+            while self._next_log_step <= self.num_timesteps:
+                self._next_log_step += self.log_interval_steps
+        return True
+
+
+class DebugRolloutStatsCallback(BaseCallback):
+    def __init__(self, *, log_interval_rollouts: int = 1) -> None:
+        super().__init__(verbose=0)
+        self.log_interval_rollouts = int(log_interval_rollouts)
+        self._rollouts = 0
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_rollout_end(self) -> None:
+        self._rollouts += 1
+        if self.log_interval_rollouts <= 0:
+            return
+        if self._rollouts % self.log_interval_rollouts != 0:
+            return
+        rollout_buffer = getattr(self.model, "rollout_buffer", None)
+        if rollout_buffer is None:
+            return
+        advantages = np.asarray(getattr(rollout_buffer, "advantages", []), dtype=float).ravel()
+        returns = np.asarray(getattr(rollout_buffer, "returns", []), dtype=float).ravel()
+        values = np.asarray(getattr(rollout_buffer, "values", []), dtype=float).ravel()
+        if advantages.size == 0 or returns.size == 0 or values.size == 0:
+            return
+        value_error = returns - values
+
+        def _stats(arr: np.ndarray) -> tuple[float, float, float, float]:
+            return float(arr.mean()), float(arr.std()), float(arr.min()), float(arr.max())
+
+        adv_mean, adv_std, adv_min, adv_max = _stats(advantages)
+        ret_mean, ret_std, ret_min, ret_max = _stats(returns)
+        val_mean, val_std, val_min, val_max = _stats(values)
+        err_mean, err_std, err_min, err_max = _stats(value_error)
+        print(
+            "debug_rollout_stats rollouts={} n={} adv_mean={:.4f} adv_std={:.4f} adv_min={:.4f} adv_max={:.4f} "
+            "return_mean={:.4f} return_std={:.4f} return_min={:.4f} return_max={:.4f} "
+            "value_mean={:.4f} value_std={:.4f} value_min={:.4f} value_max={:.4f} "
+            "value_error_mean={:.4f} value_error_std={:.4f} value_error_min={:.4f} value_error_max={:.4f}".format(
+                self._rollouts,
+                advantages.size,
+                adv_mean,
+                adv_std,
+                adv_min,
+                adv_max,
+                ret_mean,
+                ret_std,
+                ret_min,
+                ret_max,
+                val_mean,
+                val_std,
+                val_min,
+                val_max,
+                err_mean,
+                err_std,
+                err_min,
+                err_max,
+            )
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--map", default="switchback")
@@ -228,8 +388,13 @@ def main() -> int:
     ap.add_argument("--checkpoint-freq", type=int, default=10_000)
     ap.add_argument("--run-dir", default=None)
     ap.add_argument("--tensorboard-log", default=None)
+    ap.add_argument("--debug", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--mini", action=argparse.BooleanOptionalAction, default=False)
     args = ap.parse_args()
+
+    torch.set_num_threads(1)
+    if hasattr(torch, "set_num_interop_threads"):
+        torch.set_num_interop_threads(1)
 
     if args.mini:
         args.num_envs = 2
@@ -239,12 +404,22 @@ def main() -> int:
         args.eval_freq = 2_000
         args.n_eval_episodes = 4
 
-    num_envs = args.num_envs or _default_num_envs()
+    p_core_cpus = _detect_p_core_cpus()
+    if args.num_envs is None and p_core_cpus:
+        num_envs = len(p_core_cpus)
+    else:
+        num_envs = args.num_envs or _default_num_envs()
     eval_envs = max(1, int(args.eval_envs))
     total_timesteps = int(args.total_timesteps)
     chunk_steps = int(args.chunk_steps)
     if chunk_steps <= 0:
         chunk_steps = total_timesteps
+
+    main_cpu = None
+    if p_core_cpus and num_envs < len(p_core_cpus):
+        candidate = p_core_cpus[num_envs]
+        if _maybe_set_affinity([candidate]):
+            main_cpu = candidate
 
     root_dir = _resolve_root()
     run_dir = Path(args.run_dir) if args.run_dir else _next_run_dir(root_dir)
@@ -258,6 +433,83 @@ def main() -> int:
     sys.stderr = _Tee(stderr_orig, log_handle)
     print(f"run_dir={run_dir}")
     print(f"console_log={console_log_path}")
+    if p_core_cpus:
+        print(f"p_core_cpus={','.join(str(cpu) for cpu in p_core_cpus)}")
+    else:
+        print("p_core_cpus=unknown")
+    print(f"train_envs={num_envs} eval_envs={eval_envs}")
+    log_interval_sec = 0.0
+    print(f"debug={args.debug} train_log_interval_sec={log_interval_sec}")
+    if args.debug:
+        print("debug_action_input_logging=enabled")
+
+    policy_kwargs = dict(
+        net_arch=[256, 256],
+        activation_fn=torch.nn.Tanh,
+        ortho_init=False,
+    )
+    training_meta = {
+        "map": args.map,
+        "seed": args.seed,
+        "num_envs": num_envs,
+        "eval_envs": eval_envs,
+        "chunk_steps": chunk_steps,
+        "eval_freq": args.eval_freq,
+        "n_eval_episodes": args.n_eval_episodes,
+        "max_build_actions": args.max_build_actions,
+        "max_wave_ticks": args.max_wave_ticks,
+        "checkpoint_freq": args.checkpoint_freq,
+        "tensorboard_log": tb_log,
+        "debug": args.debug,
+        "mini": args.mini,
+        "p_core_cpus": p_core_cpus,
+        "main_process_cpu": main_cpu,
+    }
+    if args.debug:
+        training_meta["debug_options"] = {
+            "action_summary": True,
+            "mask_summary": True,
+            "reward_breakdown": True,
+            "invariant_checks": True,
+            "rollout_stats": True,
+        }
+    algorithm_meta = {
+        "name": "sb3_maskableppo",
+        "library": "sb3_contrib",
+        "sb3_contrib_version": getattr(sb3_contrib, "__version__", "unknown"),
+        "stable_baselines3_version": getattr(sb3, "__version__", "unknown"),
+        "torch_version": getattr(torch, "__version__", "unknown"),
+        "policy": "MlpPolicy",
+        "policy_kwargs": {
+            "net_arch": list(policy_kwargs.get("net_arch") or []),
+            "activation_fn": (
+                policy_kwargs.get("activation_fn").__name__
+                if policy_kwargs.get("activation_fn") is not None
+                else "unknown"
+            ),
+            "ortho_init": policy_kwargs.get("ortho_init"),
+        },
+        "hyperparams": {
+            "learning_rate": args.learning_rate,
+            "gamma": args.gamma,
+            "gae_lambda": args.gae_lambda,
+            "n_steps": args.n_steps,
+            "batch_size": args.batch_size,
+            "n_epochs": args.n_epochs,
+            "clip_range": args.clip_range,
+            "ent_coef": args.ent_coef,
+            "vf_coef": args.vf_coef,
+            "max_grad_norm": args.max_grad_norm,
+        },
+        "device": "auto",
+    }
+    run_metadata_path = write_run_metadata(
+        run_dir,
+        total_timesteps=total_timesteps,
+        training=training_meta,
+        algorithm=algorithm_meta,
+    )
+    print(f"run_metadata={run_metadata_path} total_timesteps={total_timesteps} step_unit=timesteps")
 
     train_env = SubprocVecEnv(
         [
@@ -268,6 +520,9 @@ def main() -> int:
                 run_dir=str(run_dir),
                 max_build_actions=args.max_build_actions,
                 max_wave_ticks=args.max_wave_ticks,
+                cpu_id=p_core_cpus[i % len(p_core_cpus)] if p_core_cpus else None,
+                log_interval_sec=log_interval_sec,
+                debug_actions=args.debug,
             )
             for i in range(num_envs)
         ]
@@ -281,16 +536,13 @@ def main() -> int:
                 run_dir=str(run_dir),
                 max_build_actions=args.max_build_actions,
                 max_wave_ticks=args.max_wave_ticks,
+                cpu_id=p_core_cpus[i] if p_core_cpus and i < len(p_core_cpus) else None,
+                debug_actions=args.debug,
             )
             for i in range(eval_envs)
         ]
     )
 
-    policy_kwargs = dict(
-        net_arch=[256, 256],
-        activation_fn=torch.nn.Tanh,
-        ortho_init=False,
-    )
     model = MaskablePPO(
         "MlpPolicy",
         train_env,
@@ -309,6 +561,11 @@ def main() -> int:
         device="auto",
         seed=args.seed,
         verbose=1,
+    )
+    write_run_metadata(
+        run_dir,
+        total_timesteps=total_timesteps,
+        algorithm={"device_resolved": str(model.device)},
     )
 
     best_model_dir = run_dir / "best_model"
@@ -336,9 +593,14 @@ def main() -> int:
         save_path=str(run_dir / "checkpoints"),
         name_prefix="maskableppo",
     )
-    callback = CallbackList([eval_callback, checkpoint_callback])
+    callbacks = [eval_callback, checkpoint_callback]
+    if args.debug:
+        callbacks.append(DebugInvalidActionCallback(log_interval_steps=args.n_steps * num_envs))
+        callbacks.append(DebugRolloutStatsCallback(log_interval_rollouts=1))
+    callback = CallbackList(callbacks)
 
     remaining = total_timesteps
+    error_info = None
     try:
         while remaining > 0:
             _pause_if_requested(run_dir)
@@ -346,7 +608,32 @@ def main() -> int:
             model.learn(total_timesteps=steps, reset_num_timesteps=False, callback=callback)
             remaining -= steps
             _pause_if_requested(run_dir)
+    except BaseException as exc:
+        error_info = {"type": type(exc).__name__, "message": str(exc)}
+        raise
     finally:
+        actual_timesteps = int(getattr(model, "num_timesteps", 0) or 0)
+        write_run_metadata(
+            run_dir,
+            total_timesteps=total_timesteps,
+            training={"actual_timesteps": actual_timesteps},
+        )
+        try:
+            log_handle.flush()
+        except Exception:
+            pass
+        try:
+            write_run_summary(
+                run_dir,
+                algorithm="sb3_maskableppo",
+                console_log=console_log_path,
+                monitor_train_dir=run_dir / "monitor" / "train",
+                monitor_eval_dir=run_dir / "monitor" / "eval",
+                eval_npz_path=eval_log_dir / "evaluations.npz",
+                error=error_info,
+            )
+        except Exception:
+            pass
         try:
             train_env.close()
         except Exception:

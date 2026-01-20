@@ -343,6 +343,8 @@ class SimpleGui:
         self._replay_done = False
         self._replay_waiting_send = False
         self._auto_send_armed = False
+        self._next_wave_button = None
+        self._next_wave_label = None
         self._auto_wave_button = None
         self._auto_wave_label = None
         self._replay_checks = None
