@@ -55,6 +55,7 @@ class VectorTDEventEnv(gym.Env):
         max_cells: int = MAX_CELLS,
         max_wave_ticks: int = 20000,
         max_build_actions: int | None = 100,
+        place_cell_top_k: int | None = None,
         strict_invalid_actions: bool = False,
         reward_config: RewardConfig | None = None,
         build_step_penalty: float = 0.0,
@@ -78,6 +79,7 @@ class VectorTDEventEnv(gym.Env):
         self.max_cells = max_cells
         self.max_wave_ticks = max_wave_ticks
         self.max_build_actions = max_build_actions
+        self.place_cell_top_k = None if place_cell_top_k is None else int(place_cell_top_k)
         self.strict_invalid_actions = strict_invalid_actions
         self.include_action_mask_in_obs = include_action_mask_in_obs
         if reward_config is None:
@@ -138,6 +140,8 @@ class VectorTDEventEnv(gym.Env):
         self.reset_seed: int | None = None
         self._debug_non_finite_obs_logged = False
         self._debug_non_finite_mask_logged = False
+        self._debug_empty_mask_logged = False
+        self._debug_forced_start_wave_logged = False
         self._debug_wave_action_stats: dict[str, Any] | None = None
         self._debug_episode_action_stats: dict[str, Any] | None = None
         self._debug_wave_mask_stats: dict[str, Any] | None = None
@@ -829,6 +833,7 @@ class VectorTDEventEnv(gym.Env):
             self.map_data,
             self.action_spec,
             phase=self.phase,
+            place_cell_top_k=self.place_cell_top_k,
         )
         mask_array = np.asarray(mask, dtype=bool)
         if self.timing_enabled:
@@ -840,9 +845,36 @@ class VectorTDEventEnv(gym.Env):
             mask_len = len(mask_array)
             forced = np.zeros(mask_len, dtype=bool)
             start_idx = self.action_spec.offsets.start_wave
-            if 0 <= start_idx < mask_len:
-                forced[start_idx] = bool(mask_array[start_idx])
-            return forced
+            if 0 <= start_idx < mask_len and bool(mask_array[start_idx]):
+                forced[start_idx] = True
+                return forced
+            if not self._debug_forced_start_wave_logged:
+                self._debug_forced_start_wave_logged = True
+                self._log_line(
+                    "mask_force_start_wave_failed step={} phase={} build_actions={} max_build_actions={} start_wave_allowed={}".format(
+                        self._step_count,
+                        self.phase,
+                        self.build_actions_since_wave,
+                        self.max_build_actions,
+                        bool(mask_array[start_idx]) if 0 <= start_idx < mask_len else False,
+                    )
+                )
+            # Fallback: keep original mask to ensure at least one valid action.
+            return mask_array
+        if not np.any(mask_array):
+            if not self._debug_empty_mask_logged:
+                self._debug_empty_mask_logged = True
+                self._log_line(
+                    "mask_empty step={} phase={} build_actions={} max_build_actions={}".format(
+                        self._step_count,
+                        self.phase,
+                        self.build_actions_since_wave,
+                        self.max_build_actions,
+                    )
+                )
+            noop_idx = self.action_spec.offsets.noop
+            if 0 <= noop_idx < len(mask_array):
+                mask_array[noop_idx] = True
         return mask_array
 
     def action_masks(self) -> np.ndarray:
@@ -950,6 +982,18 @@ class VectorTDEventEnv(gym.Env):
         if forced_start_wave:
             info["action_forced_start_wave"] = True
 
+        build_action_type = None
+        build_action_effective = None
+        if not isinstance(action_obj, StartWave):
+            build_action_type = "OTHER"
+            build_action_effective = True
+            if isinstance(action_obj, Noop):
+                build_action_type = "NOOP"
+                build_action_effective = False
+            elif isinstance(action_obj, SetMode):
+                build_action_type = "SET_MODE"
+                build_action_effective = self._is_set_mode_effective(action_obj)
+
         if self.debug_actions:
             self._debug_record_action(
                 action_obj,
@@ -1018,6 +1062,8 @@ class VectorTDEventEnv(gym.Env):
             new_state,
             phase_transition=phase_transition,
             config=self.reward_config,
+            build_action_type=build_action_type,
+            build_action_effective=build_action_effective,
             invalid_action=invalid_action,
             build_action_limit_violation=build_action_limit_violation,
             episode_done=episode_done,
@@ -1038,6 +1084,8 @@ class VectorTDEventEnv(gym.Env):
                 new_state,
                 phase_transition=phase_transition,
                 config=self.reward_config,
+                build_action_type=build_action_type,
+                build_action_effective=build_action_effective,
                 invalid_action=invalid_action,
                 build_action_limit_violation=build_action_limit_violation,
                 episode_done=episode_done,
@@ -1046,7 +1094,8 @@ class VectorTDEventEnv(gym.Env):
             info["reward_breakdown"] = breakdown
             self._log_line(
                 "debug_reward phase={} total={} score_delta={} bank_delta={} lives_lost={} no_life_loss_bonus={} "
-                "life_loss_penalty={} build_step_penalty={} invalid_action_penalty={} build_action_limit_penalty={} "
+                "life_loss_penalty={} build_step_penalty={} noop_penalty={} set_mode_penalty={} "
+                "set_mode_noop_penalty={} invalid_action_penalty={} build_action_limit_penalty={} "
                 "terminal_bonus={} terminal_penalty={}".format(
                     phase_transition,
                     breakdown["total"],
@@ -1056,6 +1105,9 @@ class VectorTDEventEnv(gym.Env):
                     breakdown["no_life_loss_bonus"],
                     breakdown["life_loss_penalty"],
                     breakdown["build_step_penalty"],
+                    breakdown["noop_penalty"],
+                    breakdown["set_mode_penalty"],
+                    breakdown["set_mode_noop_penalty"],
                     breakdown["invalid_action_penalty"],
                     breakdown["build_action_limit_penalty"],
                     breakdown["terminal_bonus"],
@@ -1172,6 +1224,21 @@ class VectorTDEventEnv(gym.Env):
             return None
         tower_slots = get_tower_slots(self.engine.state, self.max_towers)
         return tower_slots[tower_id]
+
+    def _is_set_mode_effective(self, action: SetMode) -> bool:
+        if self.action_spec is None:
+            return False
+        tower = self._resolve_tower_slot(action.tower_id)
+        if tower is None:
+            return False
+        if action.mode < 0 or action.mode >= len(self.action_spec.target_modes):
+            return False
+        mode_mask = self.action_spec.kind_to_mode_mask.get(str(getattr(tower, "kind", "")))
+        if mode_mask is not None and action.mode < len(mode_mask) and not mode_mask[action.mode]:
+            return False
+        desired_mode = self.action_spec.target_modes[action.mode]
+        current_mode = str(getattr(tower, "target_mode", ""))
+        return desired_mode != current_mode
 
     def _run_wave(self) -> tuple[int, bool]:
         if self.engine is None:

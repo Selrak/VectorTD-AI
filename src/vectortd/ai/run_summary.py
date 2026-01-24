@@ -96,6 +96,8 @@ def _parse_console_log(path: Path) -> dict[str, Any]:
     iter_vals: list[int] = []
     time_elapsed_vals: list[float] = []
     total_steps_vals: list[int] = []
+    time_step_pairs: list[tuple[float, int]] = []
+    last_time_elapsed: float | None = None
     if not path.exists():
         return {}
     with path.open(encoding="utf-8") as handle:
@@ -118,15 +120,16 @@ def _parse_console_log(path: Path) -> dict[str, Any]:
                 value = _safe_float(match.group(1))
                 if value is not None:
                     time_elapsed_vals.append(value)
+                    last_time_elapsed = value
             match = _TOTAL_STEPS_RE.search(line)
             if match:
-                total_steps_vals.append(int(match.group(1)))
-    overall_steps_per_sec = None
-    if time_elapsed_vals and total_steps_vals:
-        elapsed = time_elapsed_vals[-1]
-        steps = total_steps_vals[-1]
-        if elapsed > 0:
-            overall_steps_per_sec = steps / elapsed
+                steps_value = int(match.group(1))
+                total_steps_vals.append(steps_value)
+                if last_time_elapsed is not None:
+                    time_step_pairs.append((last_time_elapsed, steps_value))
+    overall_steps_per_sec, derived_steps_per_sec = _steps_per_sec_from_pairs(time_step_pairs)
+    if derived_steps_per_sec and not steps_per_sec_vals:
+        steps_per_sec_vals = derived_steps_per_sec
     return {
         "fps_stats": _compute_stats(fps_vals),
         "fps_segment_means": _segment_means(fps_vals),
@@ -135,6 +138,29 @@ def _parse_console_log(path: Path) -> dict[str, Any]:
         "iterations_count": len(iter_vals),
         "timesteps_last": total_steps_vals[-1] if total_steps_vals else None,
     }
+
+
+def _steps_per_sec_from_pairs(pairs: list[tuple[float, int]]) -> tuple[float | None, list[float]]:
+    if not pairs:
+        return None, []
+    total_time = 0.0
+    total_steps = 0
+    derived: list[float] = []
+    prev_time, prev_steps = pairs[0]
+    for elapsed, steps in pairs[1:]:
+        if elapsed < prev_time:
+            prev_time, prev_steps = elapsed, steps
+            continue
+        delta_time = elapsed - prev_time
+        delta_steps = steps - prev_steps
+        if delta_time > 0 and delta_steps >= 0:
+            rate = delta_steps / delta_time
+            derived.append(rate)
+            total_time += delta_time
+            total_steps += delta_steps
+        prev_time, prev_steps = elapsed, steps
+    overall = total_steps / total_time if total_time > 0 else None
+    return overall, derived
 
 
 def _parse_monitor_dir(path: Path) -> dict[str, Any]:
