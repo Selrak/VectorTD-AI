@@ -17,6 +17,8 @@ TOWER_IMAGES = {
     "purple3": "purple3.png",
     "blue1": "blue1.png",
     "blue2": "blue2.png",
+    "buffD": "buffs/tower_buff1.png",
+    "buffR": "buffs/tower_buff2.png",
 }
 
 

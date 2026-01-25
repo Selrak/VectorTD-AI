@@ -10,7 +10,8 @@ import zlib
 from typing import Iterable
 
 from ..model.entities import Tower
-from ..model.towers import get_tower_def
+from ..model.towers import BUFF_TOWER_UPS_COST, get_tower_def, is_buff_tower
+from .buffs import recompute_buffs
 
 
 _ALLOWED_CELLS_SET_CACHE: dict[int, set[tuple[int, int]]] = {}
@@ -104,8 +105,12 @@ def can_place_tower(
     if not cell_is_buildable(map_data, cell_x, cell_y, path_half_width=path_half_width):
         return False
     bank = getattr(state, "bank", None)
-    if bank is not None:
-        tower_def = get_tower_def(str(tower_kind))
+    tower_def = get_tower_def(str(tower_kind))
+    if is_buff_tower(tower_def.kind):
+        ups = getattr(state, "ups", None)
+        if ups is None or int(ups) < BUFF_TOWER_UPS_COST:
+            return False
+    elif bank is not None:
         if int(bank) < tower_def.cost:
             return False
     for tower in getattr(state, "towers", []):
@@ -136,9 +141,14 @@ def place_tower(
     if towers is None:
         return None
     tower_def = get_tower_def(str(tower_kind))
-    bank = getattr(state, "bank", None)
-    if bank is not None:
-        state.bank = int(bank) - tower_def.cost
+    if is_buff_tower(tower_def.kind):
+        ups = getattr(state, "ups", None)
+        if ups is not None:
+            state.ups = int(ups) - BUFF_TOWER_UPS_COST
+    else:
+        bank = getattr(state, "bank", None)
+        if bank is not None:
+            state.bank = int(bank) - tower_def.cost
     tower = Tower(
         cell_x=int(cell_x),
         cell_y=int(cell_y),
@@ -164,11 +174,14 @@ def place_tower(
         shot_opacity=200,
     )
     towers.append(tower)
+    recompute_buffs(state, map_data)
     return tower
 
 
-def upgrade_tower(state, tower) -> bool:
+def upgrade_tower(state, tower, map_data=None) -> bool:
     if tower is None:
+        return False
+    if is_buff_tower(getattr(tower, "kind", "")):
         return False
     if tower.level >= 10:
         return False
@@ -181,11 +194,15 @@ def upgrade_tower(state, tower) -> bool:
     tower.range += int(tower.base_range / 20)
     tower.cost += upgrade_cost
     state.bank = int(bank) - upgrade_cost
+    if map_data is not None:
+        recompute_buffs(state, map_data)
     return True
 
 
-def sell_tower(state, tower) -> int | None:
+def sell_tower(state, tower, map_data=None) -> int | None:
     if tower is None:
+        return None
+    if is_buff_tower(getattr(tower, "kind", "")):
         return None
     towers = getattr(state, "towers", None)
     if towers is None or tower not in towers:
@@ -198,6 +215,8 @@ def sell_tower(state, tower) -> int | None:
     pulses = getattr(state, "pulses", None)
     if pulses:
         state.pulses = [pulse for pulse in pulses if pulse.tower is not tower]
+    if map_data is not None:
+        recompute_buffs(state, map_data)
     return sale_price
 
 

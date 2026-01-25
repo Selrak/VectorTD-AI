@@ -47,6 +47,10 @@ class Tower:
     shot_y: float = 0.0
     shot_segments: list[tuple[float, float, float, float]] = field(default_factory=list)
     shot_opacity: int = 200
+    damage_buff_pct: int = 0
+    range_buff_pct: int = 0
+    buffed_damage: float | None = None
+    buffed_range: float | None = None
 
 
 @dataclass(slots=True)

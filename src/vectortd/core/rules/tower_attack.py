@@ -5,6 +5,7 @@ import math
 import time
 
 from ..model.entities import Creep, Tower, PulseShot, RocketShot
+from ..model.towers import is_buff_tower
 from ..rng import rand_index
 
 SHOT_FLASH_FRAMES = 2.0
@@ -31,6 +32,20 @@ PULSE_ALPHA_START = 10.0
 PULSE_ALPHA_STEP = 3.0
 PULSE_ALPHA_MAX = 100.0
 PULSE_BOUNDS_MIN = 25.0
+
+
+def _tower_range(tower: Tower) -> float:
+    buffed = getattr(tower, "buffed_range", None)
+    if buffed is not None:
+        return float(buffed)
+    return float(getattr(tower, "range", 0.0))
+
+
+def _tower_damage(tower: Tower) -> float:
+    buffed = getattr(tower, "buffed_damage", None)
+    if buffed is not None:
+        return float(buffed)
+    return float(getattr(tower, "damage", 0.0))
 
 
 def step_towers(
@@ -89,6 +104,13 @@ def step_towers(
             kind_start = perf_counter()
         if timing_full:
             tower_count += 1.0
+        if is_buff_tower(tower.kind):
+            if timing_kind:
+                kind_key = f"tower_kind_time_{tower.kind}"
+                kind_time_totals[kind_key] = kind_time_totals.get(kind_key, 0.0) + (
+                    perf_counter() - kind_start
+                )
+            continue
         tick_cooldown = not (tower.kind == "red_spammer" and not creeps)
         if timing_full:
             t0 = perf_counter()
@@ -269,7 +291,7 @@ def _is_target_valid(
     if not _creep_in_bounds(target, width, height, margin=margin):
         return False
     tx, ty = _tower_center(tower, grid)
-    return _distance_sq(tx, ty, target.x, target.y) <= float(tower.range) ** 2
+    return _distance_sq(tx, ty, target.x, target.y) <= _tower_range(tower) ** 2
 
 
 def _select_target(
@@ -282,7 +304,7 @@ def _select_target(
 ) -> Creep | None:
     mode = str(getattr(tower, "target_mode", "closest") or "closest")
     tx, ty = _tower_center(tower, grid)
-    range_sq = float(tower.range) ** 2
+    range_sq = _tower_range(tower) ** 2
 
     if mode == "random":
         candidates = _creeps_in_range(tower, creeps, width, height, grid)
@@ -328,7 +350,7 @@ def _creeps_in_range(
     grid: float,
 ) -> list[Creep]:
     tx, ty = _tower_center(tower, grid)
-    range_sq = float(tower.range) ** 2
+    range_sq = _tower_range(tower) ** 2
     candidates: list[Creep] = []
     for creep in creeps:
         if not _creep_in_bounds(creep, width, height, margin=0.0):
@@ -346,7 +368,7 @@ def _select_blue2_target(
     grid: float,
 ) -> Creep | None:
     tx, ty = _tower_center(tower, grid)
-    range_sq = float(tower.range) ** 2
+    range_sq = _tower_range(tower) ** 2
     qualifier = 0.0
     fastest: Creep | None = None
     for creep in creeps:
@@ -371,7 +393,7 @@ def _select_red_target(
     if mode not in ("closest", "weakest", "hardest"):
         return None
     tx, ty = _tower_center(tower, grid)
-    range_sq = float(tower.range) ** 2
+    range_sq = _tower_range(tower) ** 2
     qualifier = 0.0
     chosen: Creep | None = None
     for creep in creeps:
@@ -491,12 +513,12 @@ def _fire_tower(
 
 def _fire_basic(state, tower: Tower, target: Creep, origin_x: float, origin_y: float) -> None:
     _record_shot_segments(tower, [(origin_x, origin_y, float(target.x), float(target.y))])
-    _apply_damage(state, target, float(tower.damage))
+    _apply_damage(state, target, _tower_damage(tower))
 
 
 def _fire_green_laser(state, tower: Tower, target: Creep, origin_x: float, origin_y: float) -> None:
     _record_shot_segments(tower, [(origin_x, origin_y, float(target.x), float(target.y))])
-    dmg = _green_laser_damage(float(tower.damage), target.type_id)
+    dmg = _green_laser_damage(_tower_damage(tower), target.type_id)
     _apply_damage(state, target, dmg)
 
 
@@ -520,7 +542,7 @@ def _fire_red_refractor(
         if not _creep_in_bounds(target, width, height, margin=0.0):
             tower.target = None
             return
-        if _distance_sq(origin_x, origin_y, target.x, target.y) > float(tower.range) ** 2:
+        if _distance_sq(origin_x, origin_y, target.x, target.y) > _tower_range(tower) ** 2:
             tower.target = None
             return
         _apply_red_refractor_hit(
@@ -565,7 +587,7 @@ def _apply_red_refractor_hit(
     segments: list[tuple[float, float, float, float]] = [
         (origin_x, origin_y, float(target.x), float(target.y))
     ]
-    dmg = _red_damage(float(tower.damage), target.type_id)
+    dmg = _red_damage(_tower_damage(tower), target.type_id)
     target.hp -= dmg
 
     kills: list[Creep] = []
@@ -630,7 +652,7 @@ def _fire_red_spammer(
     cell_size = max(1, int(round(grid)))
     origin_x = float(tower.cell_x + rand_index(state, cell_size))
     origin_y = float(tower.cell_y + rand_index(state, cell_size))
-    _spawn_swarm_rocket(state, target, origin_x, origin_y, float(tower.damage))
+    _spawn_swarm_rocket(state, target, origin_x, origin_y, _tower_damage(tower))
 
 
 def _fire_red_rockets(
@@ -653,10 +675,10 @@ def _fire_red_rockets(
         if not _creep_in_bounds(target, width, height, margin=0.0):
             tower.target = None
             return
-        if _distance_sq(origin_x, origin_y, target.x, target.y) > float(tower.range) ** 2:
+        if _distance_sq(origin_x, origin_y, target.x, target.y) > _tower_range(tower) ** 2:
             tower.target = None
             return
-        _spawn_red_rocket(state, target, origin_x, origin_y, float(tower.damage))
+        _spawn_red_rocket(state, target, origin_x, origin_y, _tower_damage(tower))
         return
 
     target = _select_red_target(tower, creeps, width, height, grid)
@@ -664,7 +686,7 @@ def _fire_red_rockets(
         tower.cooldown = RED_RETARGET_DELAY
         return
     tower.target = target
-    _spawn_red_rocket(state, target, origin_x, origin_y, float(tower.damage))
+    _spawn_red_rocket(state, target, origin_x, origin_y, _tower_damage(tower))
 
 
 def _spawn_red_rocket(
@@ -720,7 +742,7 @@ def _fire_blue_rays(
     origin_x: float,
     origin_y: float,
 ) -> None:
-    range_sq = float(tower.range) ** 2
+    range_sq = _tower_range(tower) ** 2
     segments: list[tuple[float, float, float, float]] = []
     for creep in creeps:
         if len(segments) >= BLUE_RAY_MAX_TARGETS:
@@ -733,7 +755,7 @@ def _fire_blue_rays(
             continue
         segments.append((origin_x, origin_y, float(creep.x), float(creep.y)))
         creep.speed = float(creep.max_speed) / BLUE_RAY_SLOW_DIVISOR
-        dmg = _blue_ray_damage(float(tower.damage), creep.type_id)
+        dmg = _blue_ray_damage(_tower_damage(tower), creep.type_id)
         _apply_damage(state, creep, dmg)
     if segments:
         _record_blue_shot_segments(tower, segments)
@@ -742,7 +764,7 @@ def _fire_blue_rays(
 def _fire_blue_bash(state, tower: Tower, target: Creep, origin_x: float, origin_y: float) -> None:
     segments = [(origin_x, origin_y, float(target.x), float(target.y))]
     target.speed = BLUE2_STUN_SPEED
-    dmg = _blue_ray_damage(float(tower.damage), target.type_id)
+    dmg = _blue_ray_damage(_tower_damage(tower), target.type_id)
     _apply_damage(state, target, dmg)
     _record_blue_shot_segments(tower, segments)
 
@@ -810,7 +832,7 @@ def _fire_green_laser_chain(
     segments: list[tuple[float, float, float, float]] = [
         (origin_x, origin_y, float(target.x), float(target.y))
     ]
-    dmg = _green_laser_damage(float(tower.damage), target.type_id)
+    dmg = _green_laser_damage(_tower_damage(tower), target.type_id)
     target.hp -= dmg
     if target.hp <= 0:
         _kill_creep(state, target)
@@ -873,7 +895,7 @@ def _spawn_purple_pulses(
                 target=target,
                 from_x=float(origin_x + offset),
                 from_y=float(origin_y),
-                damage=float(tower.damage),
+                damage=_tower_damage(tower),
                 alpha=PULSE_ALPHA_START,
                 slow=slow,
             )
@@ -1061,4 +1083,3 @@ def _kill_creep(state, target: Creep) -> None:
         ups = getattr(state, "ups", None)
         if ups is not None:
             state.ups = int(ups) + 1
-

@@ -24,6 +24,12 @@ class TowerDef:
 TARGET_MODES_STANDARD: tuple[str, ...] = ("closest", "hardest", "weakest")
 TARGET_MODES_RANDOM: tuple[str, ...] = ("random",)
 TARGET_MODES_FASTEST: tuple[str, ...] = ("fastest",)
+BUFF_TOWER_KINDS: tuple[str, ...] = ("buffD", "buffR")
+BUFF_TOWER_UPS_COST = 1
+
+
+def is_buff_tower(kind: str) -> bool:
+    return str(kind) in BUFF_TOWER_KINDS
 
 
 TOWER_DEFS: dict[str, TowerDef] = {
@@ -282,6 +288,38 @@ TOWER_DEFS: dict[str, TowerDef] = {
         base_range=80,
         base_damage=6000,
         tag_color=(0, 150, 220),
+    ),
+    "buffD": TowerDef(
+        kind="buffD",
+        title="BUFF DAMAGE",
+        level=1,
+        cost=0,
+        range=80,
+        damage=0,
+        rof=0,
+        target_mode="",
+        target_modes=(),
+        description="Boosts nearby towers' damage by 25%.",
+        base_cost=0,
+        base_range=80,
+        base_damage=0,
+        tag_color=(220, 180, 0),
+    ),
+    "buffR": TowerDef(
+        kind="buffR",
+        title="BUFF RANGE",
+        level=1,
+        cost=0,
+        range=80,
+        damage=0,
+        rof=0,
+        target_mode="",
+        target_modes=(),
+        description="Boosts nearby towers' range by 25%.",
+        base_cost=0,
+        base_range=80,
+        base_damage=0,
+        tag_color=(0, 180, 220),
     ),
 }
 

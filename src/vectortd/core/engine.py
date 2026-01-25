@@ -133,11 +133,11 @@ class Engine:
             return
         if action_type == "UPGRADE_TOWER":
             tower = self._resolve_tower_from_payload(payload)
-            upgrade_tower(self.state, tower)
+            upgrade_tower(self.state, tower, self.map)
             return
         if action_type == "SELL_TOWER":
             tower = self._resolve_tower_from_payload(payload)
-            sell_tower(self.state, tower)
+            sell_tower(self.state, tower, self.map)
             return
         if action_type == "SET_TARGET_MODE":
             if not payload:
@@ -231,6 +231,7 @@ class Engine:
             "bank": s.bank,
             "lives": s.lives,
             "score": s.score,
+            "ups": s.ups,
             "wave": s.level,
             "wave_current": wave_info["current"],
             "wave_next": wave_info["next"],
@@ -259,8 +260,8 @@ class Engine:
                     "title": t.title,
                     "level": t.level,
                     "cost": t.cost,
-                    "range": t.range,
-                    "damage": t.damage,
+                    "range": t.buffed_range if t.buffed_range is not None else t.range,
+                    "damage": t.buffed_damage if t.buffed_damage is not None else t.damage,
                     "description": t.description,
                     "target_mode": t.target_mode,
                     "target_modes": list(get_tower_def(t.kind).target_modes),

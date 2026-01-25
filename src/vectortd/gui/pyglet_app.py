@@ -25,6 +25,7 @@ from ..core.model.towers import get_tower_def, list_tower_defs
 from ..core.rules.creep_motion import step_creeps
 from ..core.rules.tower_attack import step_towers
 from ..core.rules.wave_spawner import LEVELS, maybe_auto_next_wave, start_next_wave, wave_display_info
+from ..core.rules.buffs import buy_emergency_lives, buy_interest
 from ..core.rules.placement import (
     buildable_cells,
     can_place_tower,
@@ -77,6 +78,7 @@ SPEED_OPTIONS: tuple[tuple[str, float], ...] = (
 )
 
 TEST_MODE_SPEED = 0.5
+BUFF_UI_KINDS = ("buffD", "buffR", "bonus_interest", "bonus_lives")
 
 TARGET_MODE_LABELS = {
     "closest": "CLOSE",
@@ -100,7 +102,8 @@ class _TowerButton:
     kind: str
     bounds: tuple[float, float, float, float]
     rect: pyglet.shapes.BorderedRectangle
-    sprite: pyglet.sprite.Sprite
+    sprite: pyglet.sprite.Sprite | None
+    label: pyglet.text.Label | None = None
 
 
 @dataclass
@@ -497,6 +500,8 @@ class SimpleGui:
 
         self._last_lives = self.state.lives
         self._last_bank = self.state.bank
+        self._last_ups = self.state.ups
+        self._last_interest = self.state.interest
         self._build_sidebar_ui()
 
         self.window.push_handlers(
@@ -692,8 +697,16 @@ class SimpleGui:
             tag_rect.border_color = tower_def.tag_color
             tag_label.x = tag_x + tag_size / 2
             tag_label.y = tag_y + tag_size / 2
-            tag_label.color = (*tower_def.tag_color, 255)
-            tag_label.text = str(tower.level)
+            if tower.kind in ("buffD", "buffR"):
+                tag_rect.opacity = 0
+                tag_rect.border_opacity = 0
+                tag_label.color = (*tower_def.tag_color, 0)
+                tag_label.text = ""
+            else:
+                tag_rect.opacity = 255
+                tag_rect.border_opacity = 255
+                tag_label.color = (*tower_def.tag_color, 255)
+                tag_label.text = str(tower.level)
 
     def _sync_tower_shots(self) -> None:
         towers = self.state.towers
@@ -1001,12 +1014,18 @@ class SimpleGui:
 
         self._last_lives = self.state.lives
         self._last_bank = self.state.bank
+        self._last_ups = self.state.ups
+        self._last_interest = self.state.interest
         if self._lives_label is not None:
             self._lives_label.text = f"Lives: {self.state.lives}"
         if self._money_label is not None:
             self._money_label.text = f"Money: ${self.state.bank}"
+        if self._ups_label is not None:
+            self._ups_label.text = f"Points bonus: {self.state.ups}"
+        if self._interest_label is not None:
+            self._interest_label.text = f"Interest: {self.state.interest}%"
         self._set_selected_tower(None)
-        self._set_info_text("")
+        self._set_info_text("", None)
         self._refresh_tower_buttons()
         self._refresh_upgrade_button()
         self._refresh_sell_button()
@@ -1232,6 +1251,13 @@ class SimpleGui:
             self._refresh_tower_buttons()
             self._refresh_upgrade_button()
             self._refresh_sell_button()
+        if self.state.ups != self._last_ups:
+            self._last_ups = self.state.ups
+            self._ups_label.text = f"Points bonus: {self.state.ups}"
+            self._refresh_tower_buttons()
+        if self.state.interest != self._last_interest:
+            self._last_interest = self.state.interest
+            self._interest_label.text = f"Interest: {self.state.interest}%"
         if self.state.lives <= 0 and not self.state.game_over:
             self.state.game_over = True
             self.state.game_won = False
@@ -1348,6 +1374,12 @@ class SimpleGui:
             return
         if tower_kind is not None:
             if not self._tower_button_enabled.get(tower_kind, True):
+                return
+            if tower_kind == "bonus_interest":
+                buy_interest(self.state)
+                return
+            if tower_kind == "bonus_lives":
+                buy_emergency_lives(self.state)
                 return
             if self._placement_active and self._placement_kind == tower_kind:
                 self._set_placement_active(False)
@@ -1631,13 +1663,15 @@ class SimpleGui:
             spacing=12,
             min_y=bottom_layout.cursor_y,
         )
-        stats_row_height = 18
-        stats_x, stats_y, stats_w, stats_h = layout.add_box(stats_row_height)
+        stats_box_height = 36
+        stats_x, stats_y, stats_w, stats_h = layout.add_box(stats_box_height)
         stats_top = stats_y + stats_h
+        line1_y = stats_top
+        line2_y = stats_top - 18
         self._lives_label = pyglet.text.Label(
             f"Lives: {self.state.lives}",
             x=stats_x,
-            y=stats_top,
+            y=line1_y,
             anchor_x="left",
             anchor_y="top",
             font_size=_scaled_font(12),
@@ -1647,7 +1681,27 @@ class SimpleGui:
         self._money_label = pyglet.text.Label(
             f"Money: ${self.state.bank}",
             x=stats_x + stats_w,
-            y=stats_top,
+            y=line1_y,
+            anchor_x="right",
+            anchor_y="top",
+            font_size=_scaled_font(12),
+            color=(240, 240, 240, 255),
+            batch=self.ui_batch,
+        )
+        self._ups_label = pyglet.text.Label(
+            f"Points bonus: {self.state.ups}",
+            x=stats_x,
+            y=line2_y,
+            anchor_x="left",
+            anchor_y="top",
+            font_size=_scaled_font(12),
+            color=(240, 240, 240, 255),
+            batch=self.ui_batch,
+        )
+        self._interest_label = pyglet.text.Label(
+            f"Interest: {self.state.interest}%",
+            x=stats_x + stats_w,
+            y=line2_y,
             anchor_x="right",
             anchor_y="top",
             font_size=_scaled_font(12),
@@ -1657,7 +1711,8 @@ class SimpleGui:
         tower_columns = 4
         tower_spacing = 6
         tower_button_size = int((layout.width - tower_spacing * (tower_columns - 1)) / tower_columns)
-        tower_rows = math.ceil(len(self._tower_defs) / tower_columns)
+        total_buttons = len(self._tower_defs) + len(BUFF_UI_KINDS)
+        tower_rows = math.ceil(total_buttons / tower_columns)
         tower_grid = layout.add_grid(
             rows=max(1, tower_rows),
             columns=tower_columns,
@@ -1665,7 +1720,9 @@ class SimpleGui:
             spacing=tower_spacing,
         )
         self._tower_buttons.clear()
-        for tower_def in self._tower_defs:
+        button_kinds = [td.kind for td in self._tower_defs]
+        button_kinds.extend(BUFF_UI_KINDS)
+        for kind in button_kinds:
             tower_button_x, tower_button_y, _, _ = tower_grid.add_cell()
             rect = pyglet.shapes.BorderedRectangle(
                 tower_button_x,
@@ -1677,20 +1734,35 @@ class SimpleGui:
                 border_color=(110, 110, 115),
                 batch=self.ui_batch,
             )
-            tower_icon = self.tower_images[tower_def.kind]
-            sprite = pyglet.sprite.Sprite(
-                tower_icon,
-                x=tower_button_x + tower_button_size / 2,
-                y=tower_button_y + tower_button_size / 2,
-                batch=self.ui_batch,
-            )
-            icon_scale = min(
-                (tower_button_size - 12) / tower_icon.width,
-                (tower_button_size - 12) / tower_icon.height,
-            )
-            sprite.scale = icon_scale
+            sprite = None
+            label = None
+            if kind in ("bonus_interest", "bonus_lives"):
+                text = "+INT" if kind == "bonus_interest" else "+LIFE"
+                label = pyglet.text.Label(
+                    text,
+                    x=tower_button_x + tower_button_size / 2,
+                    y=tower_button_y + tower_button_size / 2,
+                    anchor_x="center",
+                    anchor_y="center",
+                    font_size=_scaled_font(12),
+                    color=(240, 240, 240, 255),
+                    batch=self.ui_batch,
+                )
+            else:
+                tower_icon = self.tower_images[kind]
+                sprite = pyglet.sprite.Sprite(
+                    tower_icon,
+                    x=tower_button_x + tower_button_size / 2,
+                    y=tower_button_y + tower_button_size / 2,
+                    batch=self.ui_batch,
+                )
+                icon_scale = min(
+                    (tower_button_size - 12) / tower_icon.width,
+                    (tower_button_size - 12) / tower_icon.height,
+                )
+                sprite.scale = icon_scale
             bounds = (tower_button_x, tower_button_y, tower_button_size, tower_button_size)
-            self._tower_buttons.append(_TowerButton(tower_def.kind, bounds, rect, sprite))
+            self._tower_buttons.append(_TowerButton(kind, bounds, rect, sprite, label))
         self._refresh_tower_buttons()
 
         upgrade_row_height = 36
@@ -1723,6 +1795,19 @@ class SimpleGui:
             color=(220, 220, 220, 255),
             batch=self.ui_batch,
         )
+        self._tower_info_bonus_label = pyglet.text.Label(
+            "",
+            x=info_x + 8,
+            y=info_y + info_h - 8,
+            width=int(info_w - 16),
+            multiline=True,
+            anchor_x="left",
+            anchor_y="top",
+            font_size=_scaled_font(10),
+            color=(40, 200, 80, 0),
+            batch=self.ui_batch,
+        )
+        self._tower_info_measure_label = pyglet.text.Label("")
 
         target_row_x, target_row_y, target_row_w, target_row_h = layout.add_box(target_row_height)
         self._target_mode_row_bounds = (target_row_x, target_row_y, target_row_w, target_row_h)
@@ -1962,10 +2047,21 @@ class SimpleGui:
                 sprite.scale = self._wave_icon_size / img.width
         sprite.opacity = 255
 
+    def _can_afford_build(self, kind: str) -> bool:
+        if kind in BUFF_UI_KINDS:
+            return getattr(self.state, "ups", 0) >= 1
+        tower_def = get_tower_def(kind)
+        return self.state.bank >= tower_def.cost
+
     def _refresh_tower_buttons(self) -> None:
+        if self._placement_active and self._placement_kind in ("bonus_interest", "bonus_lives"):
+            self._placement_active = False
+            self._tower_preview_sprite.opacity = 0
+            self._placement_range_shape.opacity = 0
+            self._placement_cell = None
+            self._placement_valid = False
         if self._placement_active:
-            active_def = get_tower_def(self._placement_kind)
-            if self.state.bank < active_def.cost:
+            if not self._can_afford_build(self._placement_kind):
                 self._placement_active = False
                 self._tower_preview_sprite.opacity = 0
                 self._placement_range_shape.opacity = 0
@@ -1973,26 +2069,34 @@ class SimpleGui:
                 self._placement_valid = False
         self._tower_button_enabled.clear()
         for button in self._tower_buttons:
-            tower_def = get_tower_def(button.kind)
-            can_afford = self.state.bank >= tower_def.cost
+            can_afford = self._can_afford_build(button.kind)
             self._tower_button_enabled[button.kind] = can_afford
             is_active = self._placement_active and self._placement_kind == button.kind
             if is_active:
                 button.rect.color = (70, 90, 70)
                 button.rect.border_color = (120, 180, 120)
                 button.rect.opacity = 255
-                button.sprite.color = (255, 255, 255)
+                if button.sprite is not None:
+                    button.sprite.color = (255, 255, 255)
+                if button.label is not None:
+                    button.label.color = (240, 240, 240, 255)
                 continue
             if can_afford:
                 button.rect.color = (60, 60, 64)
                 button.rect.border_color = (110, 110, 115)
                 button.rect.opacity = 255
-                button.sprite.color = (255, 255, 255)
+                if button.sprite is not None:
+                    button.sprite.color = (255, 255, 255)
+                if button.label is not None:
+                    button.label.color = (240, 240, 240, 255)
             else:
                 button.rect.color = (40, 40, 44)
                 button.rect.border_color = (80, 80, 85)
                 button.rect.opacity = 170
-                button.sprite.color = (130, 130, 130)
+                if button.sprite is not None:
+                    button.sprite.color = (130, 130, 130)
+                if button.label is not None:
+                    button.label.color = (130, 130, 130, 180)
 
     def _clear_target_mode_buttons(self) -> None:
         for button in self._target_mode_buttons:
@@ -2044,6 +2148,11 @@ class SimpleGui:
                 self._clear_target_mode_buttons()
             self._target_mode_button_modes = ()
             return
+        if tower.kind in ("buffD", "buffR"):
+            if self._target_mode_buttons:
+                self._clear_target_mode_buttons()
+            self._target_mode_button_modes = ()
+            return
         tower_def = get_tower_def(tower.kind)
         modes = tuple(tower_def.target_modes)
         if modes != self._target_mode_button_modes:
@@ -2073,6 +2182,11 @@ class SimpleGui:
         if not set_target_mode(self._selected_tower, mode):
             return
         self._refresh_target_mode_buttons()
+
+    def _placement_preview_range(self, kind: str) -> float:
+        if kind in ("buffD", "buffR"):
+            return 100.0
+        return float(get_tower_def(kind).range)
 
     def _set_placement_active(self, active: bool) -> None:
         if active == self._placement_active:
@@ -2245,10 +2359,10 @@ class SimpleGui:
         self._tower_preview_sprite.y = draw_y
         self._tower_preview_sprite.opacity = 150
         self._tower_preview_sprite.color = (255, 255, 255) if valid else (230, 70, 70)
-        tower_def = get_tower_def(self._placement_kind)
         self._placement_range_shape.x = draw_x
         self._placement_range_shape.y = draw_y
-        self._placement_range_shape.radius = self._world_len(tower_def.range)
+        radius = self._placement_preview_range(self._placement_kind)
+        self._placement_range_shape.radius = self._world_len(radius)
         self._placement_range_shape.color = (80, 200, 120) if valid else (200, 80, 80)
         self._placement_range_shape.opacity = 90
         self._placement_cell = cell
@@ -2279,7 +2393,7 @@ class SimpleGui:
         if tower is None:
             self._tower_range_shape.opacity = 0
             if self._hovered_tower_kind is None:
-                self._set_info_text("")
+                self._set_info_text("", None)
             self._refresh_upgrade_button()
             self._refresh_sell_button()
             self._refresh_target_mode_buttons()
@@ -2290,7 +2404,7 @@ class SimpleGui:
         self._tower_range_shape.radius = self._world_len(tower.range)
         self._tower_range_shape.opacity = 120
         if self._hovered_tower_kind is None:
-            self._set_info_text(self._tower_info_text_from_tower(tower))
+            self._set_info_text(self._tower_info_text_from_tower(tower), tower)
         self._refresh_upgrade_button()
         self._refresh_sell_button()
         self._refresh_target_mode_buttons()
@@ -2308,6 +2422,14 @@ class SimpleGui:
         return "\n".join(lines)
 
     def _tower_info_text_from_kind(self, kind: str) -> str:
+        if kind == "buffD":
+            return "Buff Damage\nCOST 1 bonus point\n+25% damage to towers in radius"
+        if kind == "buffR":
+            return "Buff Range\nCOST 1 bonus point\n+25% range to towers in radius"
+        if kind == "bonus_interest":
+            return "Interest Boost\nCOST 1 bonus point\nInterest +3% (applied at wave start)"
+        if kind == "bonus_lives":
+            return "Emergency Lives\nCOST 1 bonus point\nLives +5"
         tower_def = get_tower_def(kind)
         cost_line = f"COST ${tower_def.cost}"
         if self.state.bank < tower_def.cost:
@@ -2325,35 +2447,89 @@ class SimpleGui:
             return
         self._hovered_tower_kind = hovered_kind
         if hovered_kind is not None:
-            self._set_info_text(self._tower_info_text_from_kind(hovered_kind))
+            self._set_info_text(self._tower_info_text_from_kind(hovered_kind), None)
         else:
             if self._selected_tower is not None:
-                self._set_info_text(self._tower_info_text_from_tower(self._selected_tower))
+                self._set_info_text(
+                    self._tower_info_text_from_tower(self._selected_tower),
+                    self._selected_tower,
+                )
             else:
-                self._set_info_text("")
+                self._set_info_text("", None)
 
-    def _set_info_text(self, text: str) -> None:
+    def _format_bonus_value(self, value: float) -> str:
+        rounded = round(value)
+        if abs(value - rounded) < 0.01:
+            return str(int(rounded))
+        return f"{value:.1f}".rstrip("0").rstrip(".")
+
+    def _measure_info_text_width(self, text: str, font_size: int) -> float:
+        label = self._tower_info_measure_label
+        label.font_name = self._tower_info_label.font_name
+        label.font_size = font_size
+        label.text = text
+        return label.content_width
+
+    def _clear_info_bonus(self) -> None:
+        self._tower_info_bonus_label.text = ""
+        self._tower_info_bonus_label.color = (40, 200, 80, 0)
+
+    def _apply_info_bonus(self, tower) -> None:
+        if tower is None or tower.kind in ("buffD", "buffR"):
+            self._clear_info_bonus()
+            return
+        buffed_damage = getattr(tower, "buffed_damage", None)
+        buffed_range = getattr(tower, "buffed_range", None)
+        if buffed_damage is None or buffed_range is None:
+            self._clear_info_bonus()
+            return
+        dmg_bonus = buffed_damage - tower.damage
+        range_bonus = buffed_range - tower.range
+        if dmg_bonus <= 0.01 and range_bonus <= 0.01:
+            self._clear_info_bonus()
+            return
+        dmg_text = f"+{self._format_bonus_value(dmg_bonus)}" if dmg_bonus > 0.01 else ""
+        range_text = f"+{self._format_bonus_value(range_bonus)}m" if range_bonus > 0.01 else ""
+        font_size = self._tower_info_label.font_size
+        self._tower_info_bonus_label.font_size = font_size
+        self._tower_info_bonus_label.text = f"\n{dmg_text}\n{range_text}"
+        base_width = max(
+            self._measure_info_text_width(f"DMG: {tower.damage}", font_size),
+            self._measure_info_text_width(f"RANGE: {tower.range}m", font_size),
+        )
+        self._tower_info_bonus_label.x = self._tower_info_label.x + base_width + 6
+        self._tower_info_bonus_label.y = self._tower_info_label.y
+        self._tower_info_bonus_label.color = (40, 200, 80, 255)
+        info_x, _, info_w, _ = self._tower_info_bounds
+        max_x = info_x + info_w - 8 - self._tower_info_bonus_label.content_width
+        if self._tower_info_bonus_label.x > max_x:
+            self._tower_info_bonus_label.x = max(info_x + 8, max_x)
+
+    def _set_info_text(self, text: str, tower) -> None:
         base_size = _scaled_font(10)
         min_size = max(1, _scaled_font(7))
         _, _, info_w, info_h = self._tower_info_bounds
         max_height = max(0, info_h - 16)
         max_width = max(0, info_w - 16)
-        size = base_size
         if max_height <= 0 or max_width <= 0:
             self._tower_info_label.text = ""
+            self._clear_info_bonus()
             return
         self._tower_info_label.width = int(max_width)
-        while size >= min_size:
+        self._tower_info_bonus_label.width = int(max_width)
+        size = base_size
+        while True:
             self._tower_info_label.font_size = size
             self._tower_info_label.text = text
-            if self._tower_info_label.content_height <= max_height:
-                return
+            if self._tower_info_label.content_height <= max_height or size <= min_size:
+                break
             size -= 1
-        self._tower_info_label.font_size = min_size
-        self._tower_info_label.text = text
         if self._tower_info_label.content_height <= max_height:
+            self._apply_info_bonus(tower)
             return
+        self._tower_info_label.text = text
         self._tower_info_label.text = self._truncate_info_text(text, max_height)
+        self._apply_info_bonus(tower)
 
     def _truncate_info_text(self, text: str, max_height: float) -> str:
         label = self._tower_info_label
@@ -2384,6 +2560,8 @@ class SimpleGui:
 
     def _refresh_upgrade_button(self) -> None:
         if self._selected_tower is None or self._selected_tower.level >= 10:
+            self._upgrade_visible = False
+        elif self._selected_tower.kind in ("buffD", "buffR"):
             self._upgrade_visible = False
         else:
             self._upgrade_visible = True
@@ -2429,6 +2607,8 @@ class SimpleGui:
 
     def _refresh_sell_button(self) -> None:
         if self._selected_tower is None:
+            self._sell_visible = False
+        elif self._selected_tower.kind in ("buffD", "buffR"):
             self._sell_visible = False
         else:
             self._sell_visible = True

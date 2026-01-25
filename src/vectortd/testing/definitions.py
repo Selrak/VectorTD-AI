@@ -174,7 +174,7 @@ def apply_test_definition(state: GameState, map_data, definition: TestDefinition
                 f"kind={tower_spec.kind} cell=({tower_spec.cell_x},{tower_spec.cell_y})"
             )
         for _ in range(max(0, tower_spec.upgrades)):
-            if not upgrade_tower(state, tower):
+            if not upgrade_tower(state, tower, map_data):
                 raise ValueError(
                     "Test tower upgrade failed "
                     f"kind={tower_spec.kind} level={tower.level}"
