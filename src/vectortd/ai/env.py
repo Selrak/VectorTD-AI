@@ -3,6 +3,7 @@ from __future__ import annotations
 from numbers import Integral
 from pathlib import Path
 import logging
+import math
 import time
 from typing import Any
 
@@ -11,8 +12,22 @@ import numpy as np
 
 from vectortd.core.engine import Engine
 from vectortd.core.model.map import load_map_json
+from vectortd.core.model.towers import BUFF_TOWER_KINDS, get_tower_def, list_tower_defs
+from vectortd.core.rules.placement import buildable_cells
 from vectortd.core.rng import seed_state
 
+from .action_space.candidates import compute_path_samples, score_cells_for_type, select_top_k_diverse
+from .action_space.discrete_k import (
+    DiscreteKActionTable,
+    DiscreteKSpec,
+    OP_NOOP,
+    OP_PLACE,
+    OP_SELL,
+    OP_SET_MODE,
+    OP_START_WAVE,
+    OP_UPGRADE,
+    build_discrete_k_spec,
+)
 from .actions import (
     Action,
     MAX_CELLS,
@@ -28,13 +43,47 @@ from .actions import (
     get_tower_slots,
     unflatten,
 )
-from .masking import compute_action_mask
-from .obs import _tower_slot_features, build_observation
+from .masking import compute_action_mask, compute_action_mask_discrete_k
+from .obs import PLACE_CANDIDATE_FEATURES, _tower_slot_features, build_observation
 from .obs_flatten import SCALAR_KEYS, flatten_observation
 from .rewards import RewardConfig, RewardState, compute_reward, compute_reward_breakdown, reward_state_from
 
 
 logger = logging.getLogger(__name__)
+
+
+DISCRETE_K_TARGET_MODES = ("closest", "weakest", "hardest", "fastest", "random")
+
+
+def _kcells_for_range(range_px: int) -> int:
+    if range_px >= 150:
+        return 64
+    if range_px >= 100:
+        return 48
+    return 32
+
+
+def _dmin_cells_for_range(range_px: int) -> int:
+    return 2 if range_px >= 150 else 1
+
+
+def _effective_range_px(kind: str, base_range: int) -> float:
+    if str(kind) in BUFF_TOWER_KINDS:
+        return 100.0
+    return float(base_range)
+
+
+def _log_norm(value: int | float, scale: float) -> float:
+    if scale <= 0:
+        return 0.0
+    return min(1.0, math.log1p(max(0.0, float(value))) / math.log1p(scale))
+
+
+def _discrete_k_tower_defs():
+    tower_defs = list(list_tower_defs())
+    for kind in BUFF_TOWER_KINDS:
+        tower_defs.append(get_tower_def(kind))
+    return tower_defs
 
 
 def _resolve_map_path(map_path: str) -> Path:
@@ -51,6 +100,7 @@ class VectorTDEventEnv(gym.Env):
         self,
         *,
         default_map: str = "switchback",
+        action_space_kind: str = "legacy",
         max_towers: int = MAX_TOWERS,
         max_cells: int = MAX_CELLS,
         max_wave_ticks: int = 20000,
@@ -75,6 +125,9 @@ class VectorTDEventEnv(gym.Env):
     ) -> None:
         super().__init__()
         self.default_map = default_map
+        self.action_space_kind = str(action_space_kind)
+        if self.action_space_kind not in ("legacy", "discrete_k"):
+            raise ValueError(f"Unsupported action_space_kind={self.action_space_kind!r}")
         self.max_towers = max_towers
         self.max_cells = max_cells
         self.max_wave_ticks = max_wave_ticks
@@ -99,6 +152,14 @@ class VectorTDEventEnv(gym.Env):
         self.engine: Engine | None = None
         self.map_data = None
         self.action_spec = None
+        self._discrete_k_spec: DiscreteKSpec | None = None
+        self._action_table = None
+        self._action_obj_table: list[Action] | None = None
+        self._action_id_by_action: dict[Action, int] | None = None
+        self._place_candidate_cells: list[tuple[int, int] | None] | None = None
+        self._place_candidate_centers: list[tuple[float, float] | None] | None = None
+        self._place_candidate_static: list[tuple[float, ...]] | None = None
+        self._place_candidate_tower_idx: list[int] | None = None
         self.phase = "BUILD"
 
         self.prev_score = 0
@@ -174,6 +235,165 @@ class VectorTDEventEnv(gym.Env):
             bank,
             rng_calls,
             self._last_action_id,
+        )
+
+    def _using_discrete_k(self) -> bool:
+        return self.action_space_kind == "discrete_k"
+
+    def _action_from_discrete_k_spec(self, spec) -> Action:
+        if spec.op == OP_NOOP:
+            return Noop()
+        if spec.op == OP_START_WAVE:
+            return StartWave()
+        if spec.op == OP_PLACE:
+            if spec.t is None or spec.k is None:
+                return Noop()
+            return Place(tower_type=int(spec.t), cell=int(spec.k))
+        if spec.op == OP_UPGRADE:
+            if spec.slot is None:
+                return Noop()
+            return Upgrade(tower_id=int(spec.slot))
+        if spec.op == OP_SELL:
+            if spec.slot is None:
+                return Noop()
+            return Sell(tower_id=int(spec.slot))
+        if spec.op == OP_SET_MODE:
+            if spec.slot is None or spec.mode is None:
+                return Noop()
+            return SetMode(tower_id=int(spec.slot), mode=int(spec.mode))
+        return Noop()
+
+    def _build_discrete_k_data(self, map_data):
+        tower_defs = _discrete_k_tower_defs()
+        tower_kinds = tuple(str(tower_def.kind) for tower_def in tower_defs)
+        tower_costs = tuple(int(getattr(tower_def, "cost", 0)) for tower_def in tower_defs)
+        target_modes = tuple(DISCRETE_K_TARGET_MODES)
+        kind_to_mode_mask = {
+            str(tower_def.kind): tuple(mode in tower_def.target_modes for mode in target_modes)
+            for tower_def in tower_defs
+        }
+        kcells_by_type = tuple(_kcells_for_range(int(getattr(tower_def, "range", 0))) for tower_def in tower_defs)
+
+        buildable = list(buildable_cells(map_data))
+        path_samples = compute_path_samples(map_data, step_px=10.0)
+        grid = int(getattr(map_data, "grid", 25))
+        centers = [(cell[0] + grid * 0.5, cell[1] + grid * 0.5) for cell in buildable]
+        cell_center = {cell: center for cell, center in zip(buildable, centers)}
+        total_cells = len(buildable)
+        local_density: dict[tuple[int, int], float] = {}
+        if total_cells:
+            radius_sq = float(2 * grid) ** 2
+            for cell, center in zip(buildable, centers):
+                count = 0
+                cx, cy = center
+                for ox, oy in centers:
+                    dx = ox - cx
+                    dy = oy - cy
+                    if dx * dx + dy * dy <= radius_sq:
+                        count += 1
+                local_density[cell] = float(count) / float(total_cells)
+
+        spawn_point = path_samples[0] if path_samples else None
+        end_point = path_samples[-1] if path_samples else None
+        near_spawn: dict[tuple[int, int], float] = {}
+        near_end: dict[tuple[int, int], float] = {}
+        if spawn_point and end_point:
+            sx, sy = spawn_point
+            ex, ey = end_point
+            for cell, center in zip(buildable, centers):
+                cx, cy = center
+                spawn_dist = math.hypot(cx - sx, cy - sy)
+                end_dist = math.hypot(cx - ex, cy - ey)
+                near_spawn[cell] = min(1.0, spawn_dist / 600.0)
+                near_end[cell] = min(1.0, end_dist / 600.0)
+
+        cells_by_type: dict[int, list[tuple[int, int] | None]] = {}
+        candidate_cells_flat: list[tuple[int, int] | None] = []
+        candidate_centers_flat: list[tuple[float, float] | None] = []
+        candidate_static_flat: list[tuple[float, ...]] = []
+        candidate_tower_idx_flat: list[int] = []
+        for idx, tower_def in enumerate(tower_defs):
+            base_range = int(getattr(tower_def, "range", 0))
+            kcells = kcells_by_type[idx]
+            effective_range = _effective_range_px(tower_def.kind, base_range)
+            scored = score_cells_for_type(
+                buildable,
+                path_samples,
+                effective_range,
+                grid=grid,
+            )
+            scored_by_cell = {entry.cell: entry for entry in scored}
+            dmin_cells = _dmin_cells_for_range(base_range)
+            selected = select_top_k_diverse(scored, k=kcells, dmin_px=dmin_cells * grid)
+            if len(selected) < kcells:
+                selected.extend([None] * (kcells - len(selected)))
+            cells_by_type[idx] = selected
+            cost_norm = _log_norm(getattr(tower_def, "cost", 0), 5000.0)
+            range_norm = min(1.0, float(base_range) / 200.0)
+            is_buff_d = 1.0 if str(tower_def.kind) == "buffD" else 0.0
+            is_buff_r = 1.0 if str(tower_def.kind) == "buffR" else 0.0
+            for cell in selected:
+                candidate_tower_idx_flat.append(idx)
+                candidate_cells_flat.append(cell)
+                if cell is None:
+                    candidate_centers_flat.append(None)
+                    candidate_static_flat.append((0.0,) * 9)
+                    continue
+                entry = scored_by_cell.get(cell)
+                coverage = float(entry.coverage) if entry is not None else 0.0
+                dist_to_path = float(entry.dist_to_path) if entry is not None else 0.0
+                dist_to_path_norm = min(1.0, dist_to_path / 200.0)
+                near_spawn_norm = near_spawn.get(cell, 0.0)
+                near_end_norm = near_end.get(cell, 0.0)
+                density = local_density.get(cell, 0.0)
+                candidate_centers_flat.append(cell_center.get(cell))
+                candidate_static_flat.append(
+                    (
+                        float(cost_norm),
+                        float(range_norm),
+                        float(coverage),
+                        float(dist_to_path_norm),
+                        float(near_spawn_norm),
+                        float(near_end_norm),
+                        float(density),
+                        float(is_buff_d),
+                        float(is_buff_r),
+                    )
+                )
+
+        table_builder = DiscreteKActionTable(
+            tower_types=tower_kinds,
+            kcells_by_type=kcells_by_type,
+            ktower=self.max_towers,
+            modes=target_modes,
+        )
+        action_space, action_table, normalized_cells = table_builder.build_for_map(
+            map_data,
+            cells_by_type=cells_by_type,
+        )
+        cells_by_type_list = [normalized_cells.get(idx, []) for idx in range(len(tower_kinds))]
+        spec = build_discrete_k_spec(
+            max_towers=self.max_towers,
+            map_name=str(getattr(map_data, "name", "")),
+            tower_kinds=tower_kinds,
+            tower_costs=tower_costs,
+            target_modes=target_modes,
+            kind_to_mode_mask=kind_to_mode_mask,
+            kcells_by_type=kcells_by_type,
+            cells_by_type=cells_by_type_list,
+        )
+        action_obj_table = [self._action_from_discrete_k_spec(item) for item in action_table]
+        action_id_by_action = {action: idx for idx, action in enumerate(action_obj_table)}
+        return (
+            spec,
+            action_space,
+            action_table,
+            action_obj_table,
+            action_id_by_action,
+            candidate_cells_flat,
+            candidate_centers_flat,
+            candidate_static_flat,
+            candidate_tower_idx_flat,
         )
 
     def _debug_check_finite(self, *, kind: str, array: Any) -> None:
@@ -388,6 +608,8 @@ class VectorTDEventEnv(gym.Env):
         spec = self.action_spec
         if spec is None:
             return
+        if not hasattr(spec, "cell_positions"):
+            return
         mask_array = np.asarray(mask, dtype=bool)
         build_limit_reached = self._build_action_limit_reached()
         start_idx = spec.offsets.start_wave
@@ -538,7 +760,7 @@ class VectorTDEventEnv(gym.Env):
         items.sort(key=lambda item: (-item[1], item[0]))
         parts = []
         for cell_idx, count in items[:limit]:
-            if spec is not None and 0 <= cell_idx < len(spec.cell_positions):
+            if spec is not None and hasattr(spec, "cell_positions") and 0 <= cell_idx < len(spec.cell_positions):
                 cell_x, cell_y = spec.cell_positions[cell_idx]
                 parts.append(f"{cell_x}x{cell_y}:{count}")
             else:
@@ -666,14 +888,25 @@ class VectorTDEventEnv(gym.Env):
         try:
             resolved = _resolve_map_path(self.default_map)
             map_data = load_map_json(resolved)
-            spec = action_space_spec(
-                map_data,
-                max_towers=self.max_towers,
-                max_cells=self.max_cells,
-            )
-            slot_size = len(_tower_slot_features(spec))
-            self._obs_dim = len(SCALAR_KEYS) + self.max_towers * slot_size
-            self.action_space = gym.spaces.Discrete(spec.num_actions)
+            if self._using_discrete_k():
+                spec, action_space, _, _, _, _, _, _, _ = self._build_discrete_k_data(map_data)
+                slot_size = len(_tower_slot_features(spec))
+                candidate_dim = len(PLACE_CANDIDATE_FEATURES)
+                self._obs_dim = (
+                    len(SCALAR_KEYS)
+                    + self.max_towers * slot_size
+                    + spec.place_count * candidate_dim
+                )
+                self.action_space = action_space
+            else:
+                spec = action_space_spec(
+                    map_data,
+                    max_towers=self.max_towers,
+                    max_cells=self.max_cells,
+                )
+                slot_size = len(_tower_slot_features(spec))
+                self._obs_dim = len(SCALAR_KEYS) + self.max_towers * slot_size
+                self.action_space = gym.spaces.Discrete(spec.num_actions)
             self.observation_space = gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
@@ -770,12 +1003,34 @@ class VectorTDEventEnv(gym.Env):
         self._step_count = 0
         self.reset_seed = seed_value
 
-        self.action_spec = action_space_spec(
-            self.map_data,
-            max_towers=self.max_towers,
-            max_cells=self.max_cells,
-        )
-        self.action_space = gym.spaces.Discrete(self.action_spec.num_actions)
+        if self._using_discrete_k():
+            (
+                self._discrete_k_spec,
+                self.action_space,
+                self._action_table,
+                self._action_obj_table,
+                self._action_id_by_action,
+                self._place_candidate_cells,
+                self._place_candidate_centers,
+                self._place_candidate_static,
+                self._place_candidate_tower_idx,
+            ) = self._build_discrete_k_data(self.map_data)
+            self.action_spec = self._discrete_k_spec
+        else:
+            self.action_spec = action_space_spec(
+                self.map_data,
+                max_towers=self.max_towers,
+                max_cells=self.max_cells,
+            )
+            self.action_space = gym.spaces.Discrete(self.action_spec.num_actions)
+            self._discrete_k_spec = None
+            self._action_table = None
+            self._action_obj_table = None
+            self._action_id_by_action = None
+            self._place_candidate_cells = None
+            self._place_candidate_centers = None
+            self._place_candidate_static = None
+            self._place_candidate_tower_idx = None
 
         self.phase = "BUILD"
         self.prev_score = int(getattr(self.engine.state, "score", 0))
@@ -787,10 +1042,21 @@ class VectorTDEventEnv(gym.Env):
         self.build_actions_since_wave = 0
         self._debug_reset_episode_stats()
 
-        obs_dict = build_observation(self.engine.state, self.map_data, self.action_spec)
+        obs_dict = build_observation(
+            self.engine.state,
+            self.map_data,
+            self.action_spec,
+            place_candidate_cells=self._place_candidate_cells,
+            place_candidate_centers=self._place_candidate_centers,
+            place_candidate_static=self._place_candidate_static,
+            place_candidate_tower_idx=self._place_candidate_tower_idx,
+        )
         obs_dict["phase"] = self.phase
         slot_size = len(obs_dict.get("tower_slot_features", []) or [])
-        self._obs_dim = len(SCALAR_KEYS) + self.max_towers * slot_size
+        place_candidates = obs_dict.get("place_candidates", []) or []
+        place_candidate_features = obs_dict.get("place_candidate_features", []) or []
+        candidate_dim = len(place_candidate_features)
+        self._obs_dim = len(SCALAR_KEYS) + self.max_towers * slot_size + len(place_candidates) * candidate_dim
         self.observation_space = gym.spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -826,6 +1092,55 @@ class VectorTDEventEnv(gym.Env):
     def _compute_action_mask(self) -> np.ndarray:
         if self.engine is None or self.map_data is None or self.action_spec is None:
             raise RuntimeError("Environment not reset")
+        if self._using_discrete_k():
+            start_time = time.perf_counter() if self.timing_enabled else 0.0
+            mask = compute_action_mask_discrete_k(
+                self.engine.state,
+                self.engine,
+                self.map_data,
+                self.action_spec,
+                phase=self.phase,
+            )
+            mask_array = np.asarray(mask, dtype=bool)
+            if self.timing_enabled:
+                self.timing["mask_calls"] = self.timing.get("mask_calls", 0.0) + 1.0
+                self.timing["mask_time_total"] = self.timing.get("mask_time_total", 0.0) + (
+                    time.perf_counter() - start_time
+                )
+            if self._build_action_limit_reached():
+                mask_len = len(mask_array)
+                forced = np.zeros(mask_len, dtype=bool)
+                start_idx = self.action_spec.offsets.start_wave
+                if 0 <= start_idx < mask_len and bool(mask_array[start_idx]):
+                    forced[start_idx] = True
+                    return forced
+                if not self._debug_forced_start_wave_logged:
+                    self._debug_forced_start_wave_logged = True
+                    self._log_line(
+                        "mask_force_start_wave_failed step={} phase={} build_actions={} max_build_actions={} start_wave_allowed={}".format(
+                            self._step_count,
+                            self.phase,
+                            self.build_actions_since_wave,
+                            self.max_build_actions,
+                            bool(mask_array[start_idx]) if 0 <= start_idx < mask_len else False,
+                        )
+                    )
+                return mask_array
+            if not np.any(mask_array):
+                if not self._debug_empty_mask_logged:
+                    self._debug_empty_mask_logged = True
+                    self._log_line(
+                        "mask_empty step={} phase={} build_actions={} max_build_actions={}".format(
+                            self._step_count,
+                            self.phase,
+                            self.build_actions_since_wave,
+                            self.max_build_actions,
+                        )
+                    )
+                noop_idx = self.action_spec.offsets.noop
+                if 0 <= noop_idx < len(mask_array):
+                    mask_array[noop_idx] = True
+            return mask_array
         start_time = time.perf_counter() if self.timing_enabled else 0.0
         mask = compute_action_mask(
             self.engine.state,
@@ -923,25 +1238,52 @@ class VectorTDEventEnv(gym.Env):
         action_id: int | None = None
 
         if isinstance(action, Integral):
-            try:
-                action_obj = unflatten(int(action), self.action_spec)
+            if self._using_discrete_k():
                 action_id = int(action)
-            except Exception as exc:
-                if self.strict_invalid_actions:
-                    raise ValueError(f"Invalid action id {action!r}") from exc
-                action_obj = Noop()
-                action_id = self.action_spec.offsets.noop
-                invalid_action = True
+                if self._action_obj_table is None or action_id < 0 or action_id >= len(self._action_obj_table):
+                    if self.strict_invalid_actions:
+                        raise ValueError(f"Invalid action id {action!r}")
+                    action_obj = Noop()
+                    action_id = self.action_spec.offsets.noop
+                    invalid_action = True
+                else:
+                    action_obj = self._action_obj_table[action_id]
+            else:
+                try:
+                    action_obj = unflatten(int(action), self.action_spec)
+                    action_id = int(action)
+                except Exception as exc:
+                    if self.strict_invalid_actions:
+                        raise ValueError(f"Invalid action id {action!r}") from exc
+                    action_obj = Noop()
+                    action_id = self.action_spec.offsets.noop
+                    invalid_action = True
         else:
             action_obj = action
-            try:
-                action_id = flatten(action_obj, self.action_spec)
-            except Exception as exc:
-                if self.strict_invalid_actions:
-                    raise ValueError(f"Invalid action {action_obj!r}") from exc
-                action_obj = Noop()
-                action_id = self.action_spec.offsets.noop
-                invalid_action = True
+            if self._using_discrete_k():
+                if self._action_id_by_action is None:
+                    if self.strict_invalid_actions:
+                        raise ValueError(f"Invalid action {action_obj!r}")
+                    action_obj = Noop()
+                    action_id = self.action_spec.offsets.noop
+                    invalid_action = True
+                else:
+                    action_id = self._action_id_by_action.get(action_obj)
+                    if action_id is None:
+                        if self.strict_invalid_actions:
+                            raise ValueError(f"Invalid action {action_obj!r}")
+                        action_obj = Noop()
+                        action_id = self.action_spec.offsets.noop
+                        invalid_action = True
+            else:
+                try:
+                    action_id = flatten(action_obj, self.action_spec)
+                except Exception as exc:
+                    if self.strict_invalid_actions:
+                        raise ValueError(f"Invalid action {action_obj!r}") from exc
+                    action_obj = Noop()
+                    action_id = self.action_spec.offsets.noop
+                    invalid_action = True
 
         if self._last_action_mask is None:
             raise RuntimeError("Action mask cache missing; reset() must be called first")
@@ -1124,7 +1466,15 @@ class VectorTDEventEnv(gym.Env):
         mask_after = self._compute_action_mask()
         self._last_action_mask = mask_after
         obs_start = time.perf_counter() if self.timing_enabled else 0.0
-        obs_dict = build_observation(self.engine.state, self.map_data, self.action_spec)
+        obs_dict = build_observation(
+            self.engine.state,
+            self.map_data,
+            self.action_spec,
+            place_candidate_cells=self._place_candidate_cells,
+            place_candidate_centers=self._place_candidate_centers,
+            place_candidate_static=self._place_candidate_static,
+            place_candidate_tower_idx=self._place_candidate_tower_idx,
+        )
         if self.timing_enabled:
             self.timing["obs_time_total"] = self.timing.get("obs_time_total", 0.0) + (
                 time.perf_counter() - obs_start
@@ -1163,8 +1513,72 @@ class VectorTDEventEnv(gym.Env):
             self._maybe_log_heartbeat()
         return obs, reward, terminated, truncated, info
 
+    def _apply_discrete_k_action(self, action: Action) -> None:
+        if self.engine is None or self.action_spec is None:
+            return
+        if isinstance(action, Noop):
+            return
+        if isinstance(action, StartWave):
+            self.engine.act("NEXT_WAVE")
+            return
+        if isinstance(action, Place):
+            tower_types = getattr(self.action_spec, "tower_kinds", ())
+            cells_by_type = getattr(self.action_spec, "cells_by_type", ())
+            if action.tower_type < 0 or action.tower_type >= len(tower_types):
+                return
+            if action.tower_type >= len(cells_by_type):
+                return
+            cell_list = cells_by_type[action.tower_type]
+            if action.cell < 0 or action.cell >= len(cell_list):
+                return
+            cell = cell_list[action.cell]
+            if cell is None:
+                return
+            cell_x, cell_y = cell
+            tower_kind = tower_types[action.tower_type]
+            self.engine.act(
+                "PLACE_TOWER",
+                {"cell_x": int(cell_x), "cell_y": int(cell_y), "kind": tower_kind},
+            )
+            return
+        if isinstance(action, Upgrade):
+            tower = self._resolve_tower_slot(action.tower_id)
+            if tower is None:
+                return
+            self.engine.act(
+                "UPGRADE_TOWER",
+                {"cell_x": tower.cell_x, "cell_y": tower.cell_y, "tower_id": id(tower)},
+            )
+            return
+        if isinstance(action, Sell):
+            tower = self._resolve_tower_slot(action.tower_id)
+            if tower is None:
+                return
+            self.engine.act(
+                "SELL_TOWER",
+                {"cell_x": tower.cell_x, "cell_y": tower.cell_y, "tower_id": id(tower)},
+            )
+            return
+        if isinstance(action, SetMode):
+            tower = self._resolve_tower_slot(action.tower_id)
+            if tower is None:
+                return
+            target_modes = getattr(self.action_spec, "target_modes", ())
+            if action.mode < 0 or action.mode >= len(target_modes):
+                return
+            mode = target_modes[action.mode]
+            self.engine.act(
+                "SET_TARGET_MODE",
+                {"mode": mode, "cell_x": tower.cell_x, "cell_y": tower.cell_y, "tower_id": id(tower)},
+            )
+            return
+        raise TypeError(f"Unknown action {action!r}")
+
     def _apply_action(self, action: Action) -> None:
         if self.engine is None or self.action_spec is None:
+            return
+        if self._using_discrete_k():
+            self._apply_discrete_k_action(action)
             return
         if isinstance(action, Noop):
             return

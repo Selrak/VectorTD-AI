@@ -178,7 +178,14 @@ def _build_report(stats: dict[str, Any], timing: dict[str, Any], vec_timing: dic
     lines = [
         "VectorTD SB3 MaskablePPO throughput benchmark",
         f"timestamp={time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"cfg={stats['cfg_path']} map={stats['map']} seed={stats['seed']}",
+        (
+            "cfg={cfg} map={map} seed={seed} action_space_kind={action_space_kind}".format(
+                cfg=stats["cfg_path"],
+                map=stats["map"],
+                seed=stats["seed"],
+                action_space_kind=stats["action_space_kind"],
+            )
+        ),
         "vec_env={vec_env} num_envs={num_envs} n_steps={n_steps} batch_size={batch_size}".format(
             vec_env=stats["vec_env"],
             num_envs=stats["num_envs"],
@@ -294,12 +301,14 @@ def _make_env_factory(
     base_seed: int,
     max_build_actions: int,
     max_wave_ticks: int,
+    action_space_kind: str,
     reward_config,
     place_cell_top_k: int | None,
 ):
     def _init():
         env = VectorTDEventEnv(
             default_map=map_path,
+            action_space_kind=action_space_kind,
             max_build_actions=max_build_actions,
             max_wave_ticks=max_wave_ticks,
             reward_config=reward_config,
@@ -335,7 +344,7 @@ def main() -> int:
     default_cfg = {
         "schema_version": 1,
         "run": {"total_timesteps": 50_000, "num_envs": max(1, (os.cpu_count() or 1) - 1)},
-        "env": {"max_build_actions": 100, "max_wave_ticks": 20_000},
+        "env": {"action_space_kind": "legacy", "max_build_actions": 100, "max_wave_ticks": 20_000},
         "masking": {"place_cell_top_k": None},
         "reward": {},
         "sb3": {},
@@ -360,6 +369,8 @@ def main() -> int:
     total_timesteps = int(cfg["run"]["total_timesteps"])
     map_path = str(cfg["run"].get("map", args.map))
     seed = int(cfg["run"].get("seed", args.seed))
+    action_space_kind = cfg["env"].get("action_space_kind") or "legacy"
+    action_space_kind = str(action_space_kind)
     max_build_actions = int(cfg["env"].get("max_build_actions", 100))
     max_wave_ticks = int(cfg["env"].get("max_wave_ticks", 20_000))
     place_cell_top_k = cfg.get("masking", {}).get("place_cell_top_k")
@@ -375,6 +386,7 @@ def main() -> int:
             base_seed=seed,
             max_build_actions=max_build_actions,
             max_wave_ticks=max_wave_ticks,
+            action_space_kind=action_space_kind,
             reward_config=reward_cfg,
             place_cell_top_k=place_cell_top_k,
         )
@@ -422,6 +434,7 @@ def main() -> int:
         "cfg_path": str(Path(args.cfg)),
         "map": map_path,
         "seed": seed,
+        "action_space_kind": action_space_kind,
         "vec_env": args.vec_env,
         "num_envs": num_envs,
         "n_steps": int((cfg.get("sb3") or {}).get("n_steps", 0) or 0),

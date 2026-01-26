@@ -16,6 +16,7 @@ _ALLOWED_KEYS: dict[str, Any] = {
         "log_interval_sec": None,
     },
     "env": {
+        "action_space_kind": None,
         "max_build_actions": None,
         "max_wave_ticks": None,
         "deterministic_eval": None,
@@ -193,6 +194,14 @@ def _validate_config(cfg: dict[str, Any]) -> None:
             raise ValueError("masking.place_cell_top_k must be a number or null")
         if place_cell_top_k < 0:
             raise ValueError("masking.place_cell_top_k must be >= 0 or null")
+
+    env_cfg = _require_dict(cfg, "env")
+    action_space_kind = env_cfg.get("action_space_kind")
+    if action_space_kind is not None:
+        if not isinstance(action_space_kind, str):
+            raise ValueError("env.action_space_kind must be a string or null")
+        if action_space_kind not in ("legacy", "discrete_k"):
+            raise ValueError("env.action_space_kind must be 'legacy' or 'discrete_k'")
 
 
 def _find_unknown_keys(value: Any, allowed: Any, *, path: str) -> list[str]:

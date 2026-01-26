@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 import math
 
-from vectortd.core.model.towers import list_tower_defs
+from vectortd.core.model.towers import is_buff_tower, list_tower_defs
+from vectortd.core.rules.placement import cell_is_buildable
 from vectortd.core.rules.wave_spawner import LEVELS, wave_display_info
 
 from .actions import ActionSpaceSpec, sorted_towers
@@ -15,6 +16,20 @@ INTEREST_SCALE = 10.0
 BASE_WORTH_SCALE = 50.0
 HP_SCALE = 1_000_000.0
 SCORE_SCALE_MULTIPLIER = 10.0
+PLACE_CANDIDATE_FEATURES = (
+    "valid",
+    "affordable",
+    "cost_norm",
+    "range_norm",
+    "coverage",
+    "dist_to_path_norm",
+    "near_spawn_norm",
+    "near_end_norm",
+    "local_density",
+    "tower_count_in_buff_radius",
+    "is_buffD",
+    "is_buffR",
+)
 
 
 def _log_norm(value: int | float, scale: float) -> float:
@@ -50,7 +65,27 @@ def _tower_slot_features(spec: ActionSpaceSpec) -> list[str]:
     return features
 
 
-def build_observation(state, map_data, spec: ActionSpaceSpec) -> dict[str, Any]:
+def _cell_within_bounds(map_data, cell_x: int, cell_y: int) -> bool:
+    grid = int(getattr(map_data, "grid", 25))
+    width = int(getattr(map_data, "width", 0))
+    height = int(getattr(map_data, "height", 0))
+    if grid <= 0 or width <= 0 or height <= 0:
+        return False
+    if cell_x < 0 or cell_y < 0:
+        return False
+    return cell_x + grid <= width and cell_y + grid <= height
+
+
+def build_observation(
+    state,
+    map_data,
+    spec: ActionSpaceSpec,
+    *,
+    place_candidate_cells: list[tuple[int, int] | None] | None = None,
+    place_candidate_centers: list[tuple[float, float] | None] | None = None,
+    place_candidate_static: list[tuple[float, ...]] | None = None,
+    place_candidate_tower_idx: list[int] | None = None,
+) -> dict[str, Any]:
     wave_info = wave_display_info(state, map_data)
     current = wave_info.get("current") or {}
     next_wave = wave_info.get("next") or {}
@@ -68,6 +103,7 @@ def build_observation(state, map_data, spec: ActionSpaceSpec) -> dict[str, Any]:
 
     bank = int(getattr(state, "bank", 0))
     score = int(getattr(state, "score", 0))
+    ups_value = int(getattr(state, "ups", 0))
     bank_scale = max_cost * float(spec.max_towers)
     score_scale = max(bank_scale * SCORE_SCALE_MULTIPLIER, 1.0)
 
@@ -111,6 +147,7 @@ def build_observation(state, map_data, spec: ActionSpaceSpec) -> dict[str, Any]:
 
     obs: dict[str, Any] = {
         "bank": bank,
+        "ups": ups_value,
         "lives": int(getattr(state, "lives", 0)),
         "score": score,
         "wave": int(getattr(state, "level", 0)),
@@ -127,6 +164,7 @@ def build_observation(state, map_data, spec: ActionSpaceSpec) -> dict[str, Any]:
         "score_norm": _log_norm(score, score_scale),
         "wave_norm": min(1.0, float(getattr(state, "level", 0)) / max_waves),
         "interest_norm": min(1.0, float(getattr(state, "interest", 0)) / INTEREST_SCALE),
+        "ups_norm": float(ups_value) / (float(ups_value) + 1.0),
         "base_hp_norm": _log_norm(getattr(state, "base_hp", 0), HP_SCALE),
         "base_worth_norm": min(1.0, float(getattr(state, "base_worth", 0)) / BASE_WORTH_SCALE),
         "tower_count_norm": min(1.0, float(len(getattr(state, "towers", []) or [])) / spec.max_towers),
@@ -139,4 +177,100 @@ def build_observation(state, map_data, spec: ActionSpaceSpec) -> dict[str, Any]:
         "tower_slots": tower_slots,
         "tower_slot_features": slot_features,
     }
+
+    if (
+        place_candidate_cells is not None
+        and place_candidate_static is not None
+        and place_candidate_tower_idx is not None
+    ):
+        towers = list(getattr(state, "towers", []) or [])
+        can_build = len(towers) < int(getattr(spec, "max_towers", len(towers) + 1))
+        occupied = {(int(getattr(tower, "cell_x", 0)), int(getattr(tower, "cell_y", 0))) for tower in towers}
+        grid = int(getattr(map_data, "grid", 25))
+        tower_centers = [
+            (float(getattr(tower, "cell_x", 0)) + grid * 0.5, float(getattr(tower, "cell_y", 0)) + grid * 0.5)
+            for tower in towers
+        ]
+        buff_radius_sq = 100.0 * 100.0
+        max_towers_norm = max(1, int(getattr(spec, "max_towers", 1)))
+        ups = int(getattr(state, "ups", 0))
+
+        if place_candidate_centers is None:
+            place_candidate_centers = []
+            for cell in place_candidate_cells:
+                if cell is None:
+                    place_candidate_centers.append(None)
+                    continue
+                cell_x, cell_y = cell
+                place_candidate_centers.append((cell_x + grid * 0.5, cell_y + grid * 0.5))
+
+        place_candidates: list[list[float]] = []
+        for idx, cell in enumerate(place_candidate_cells):
+            if cell is None or idx >= len(place_candidate_static):
+                place_candidates.append([0.0] * len(PLACE_CANDIDATE_FEATURES))
+                continue
+            static = place_candidate_static[idx]
+            tower_idx = place_candidate_tower_idx[idx] if idx < len(place_candidate_tower_idx) else -1
+            kind = (
+                str(spec.tower_kinds[tower_idx])
+                if 0 <= tower_idx < len(spec.tower_kinds)
+                else ""
+            )
+            is_buff = is_buff_tower(kind)
+            cost = int(spec.tower_costs[tower_idx]) if 0 <= tower_idx < len(spec.tower_costs) else 0
+
+            cell_x, cell_y = cell
+            valid = (
+                can_build
+                and _cell_within_bounds(map_data, cell_x, cell_y)
+                and cell_is_buildable(map_data, cell_x, cell_y)
+                and (cell_x, cell_y) not in occupied
+            )
+            if is_buff:
+                affordable = ups >= 1
+            else:
+                affordable = bank >= cost
+
+            center = place_candidate_centers[idx] if idx < len(place_candidate_centers) else None
+            if center is None:
+                tower_count_norm = 0.0
+            else:
+                cx, cy = center
+                count = 0
+                for tx, ty in tower_centers:
+                    dx = tx - cx
+                    dy = ty - cy
+                    if dx * dx + dy * dy <= buff_radius_sq:
+                        count += 1
+                tower_count_norm = min(1.0, float(count) / float(max_towers_norm))
+
+            cost_norm = static[0] if len(static) > 0 else 0.0
+            range_norm = static[1] if len(static) > 1 else 0.0
+            coverage = static[2] if len(static) > 2 else 0.0
+            dist_to_path_norm = static[3] if len(static) > 3 else 0.0
+            near_spawn_norm = static[4] if len(static) > 4 else 0.0
+            near_end_norm = static[5] if len(static) > 5 else 0.0
+            local_density = static[6] if len(static) > 6 else 0.0
+            is_buff_d = static[7] if len(static) > 7 else 0.0
+            is_buff_r = static[8] if len(static) > 8 else 0.0
+
+            place_candidates.append(
+                [
+                    1.0 if valid else 0.0,
+                    1.0 if affordable else 0.0,
+                    float(cost_norm),
+                    float(range_norm),
+                    float(coverage),
+                    float(dist_to_path_norm),
+                    float(near_spawn_norm),
+                    float(near_end_norm),
+                    float(local_density),
+                    float(tower_count_norm),
+                    float(is_buff_d),
+                    float(is_buff_r),
+                ]
+            )
+
+        obs["place_candidates"] = place_candidates
+        obs["place_candidate_features"] = list(PLACE_CANDIDATE_FEATURES)
     return obs

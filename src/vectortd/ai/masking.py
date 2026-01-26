@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from vectortd.core.model.towers import is_buff_tower
+from vectortd.core.rules.placement import can_place_tower
 from vectortd.core.rules.wave_spawner import LEVELS, wave_display_info
 
+from .action_space.discrete_k import DiscreteKSpec
 from .actions import ActionSpaceSpec, _log_cap_exceeded, get_tower_slots
 
 _CELL_DISTANCE_CACHE: dict[int, list[int]] = {}
@@ -201,6 +204,101 @@ def compute_action_mask(
             for mode_idx, supported in enumerate(mode_mask):
                 if supported:
                     mask[base + mode_idx] = True
+
+    if use_numpy:
+        return mask
+    return mask
+
+
+def compute_action_mask_discrete_k(
+    state,
+    engine,
+    map_data,
+    spec: DiscreteKSpec,
+    *,
+    phase: str = "BUILD",
+) -> list[bool]:
+    use_numpy = False
+    try:
+        import numpy as np  # type: ignore
+
+        use_numpy = True
+    except Exception:
+        np = None  # type: ignore
+
+    if spec.num_actions <= 0:
+        return [False] * spec.num_actions
+
+    if use_numpy:
+        mask = np.zeros(spec.num_actions, dtype=bool)
+    else:
+        mask = [False] * spec.num_actions
+
+    if 0 <= spec.offsets.noop < spec.num_actions:
+        mask[spec.offsets.noop] = True
+
+    if phase != "BUILD" or getattr(state, "game_over", False):
+        return mask
+
+    if _can_start_wave(state, map_data) and 0 <= spec.offsets.start_wave < spec.num_actions:
+        mask[spec.offsets.start_wave] = True
+
+    towers = getattr(state, "towers", []) or []
+    if len(towers) > spec.max_towers:
+        _log_cap_exceeded("towers", len(towers), spec.max_towers, context=spec.map_name)
+
+    can_build = len(towers) < spec.max_towers
+    if can_build and spec.place_count > 0:
+        place_offset = spec.offsets.place
+        for tower_idx, kcells in enumerate(spec.kcells_by_type):
+            if place_offset >= spec.num_actions:
+                break
+            kind = spec.tower_kinds[tower_idx]
+            cell_list = spec.cells_by_type[tower_idx] if tower_idx < len(spec.cells_by_type) else ()
+            for k in range(kcells):
+                if place_offset + k >= spec.num_actions:
+                    break
+                cell = cell_list[k] if k < len(cell_list) else None
+                if cell is None:
+                    continue
+                cell_x, cell_y = cell
+                if can_place_tower(state, map_data, int(cell_x), int(cell_y), tower_kind=str(kind)):
+                    mask[place_offset + k] = True
+            place_offset += kcells
+
+    tower_slots = get_tower_slots(state, spec.max_towers)
+    bank_value = getattr(state, "bank", None)
+    bank_value = int(bank_value) if bank_value is not None else None
+    mode_count = len(spec.target_modes)
+    for slot_idx, tower in enumerate(tower_slots):
+        if tower is None:
+            continue
+        tower_kind = str(getattr(tower, "kind", ""))
+        if not is_buff_tower(tower_kind):
+            if bank_value is None:
+                can_upgrade = int(getattr(tower, "level", 0)) < 10
+            else:
+                upgrade_cost = int(getattr(tower, "base_cost", 0) / 2)
+                can_upgrade = int(getattr(tower, "level", 0)) < 10 and bank_value >= upgrade_cost
+            if can_upgrade and spec.offsets.upgrade + slot_idx < spec.num_actions:
+                mask[spec.offsets.upgrade + slot_idx] = True
+            if spec.offsets.sell + slot_idx < spec.num_actions:
+                mask[spec.offsets.sell + slot_idx] = True
+
+        if mode_count:
+            mode_mask = spec.kind_to_mode_mask.get(tower_kind)
+            if mode_mask is None:
+                continue
+            base = spec.offsets.set_mode + slot_idx * mode_count
+            if base >= spec.num_actions:
+                continue
+            for mode_idx, supported in enumerate(mode_mask):
+                if not supported:
+                    continue
+                idx = base + mode_idx
+                if idx >= spec.num_actions:
+                    break
+                mask[idx] = True
 
     if use_numpy:
         return mask

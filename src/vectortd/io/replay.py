@@ -23,6 +23,7 @@ from vectortd.ai.actions import (
     action_space_spec,
     action_to_dict,
     get_tower_slots,
+    unflatten,
 )
 
 
@@ -338,6 +339,36 @@ def save_replay(path: str | Path, replay: Replay) -> None:
 
 def load_replay(path: str | Path) -> Replay:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if "waves" not in data and "actions" in data:
+        map_path = str(data.get("map_path", ""))
+        if not map_path:
+            raise ValueError("Replay missing map_path")
+        resolved = _resolve_map_path(map_path)
+        map_data = load_map_json(resolved)
+        spec = action_space_spec(map_data)
+        waves: list[list[Action]] = []
+        current: list[Action] = []
+        saw_start = False
+        for raw_id in data.get("actions", []) or []:
+            try:
+                action = unflatten(int(raw_id), spec)
+            except (TypeError, ValueError):
+                action = Noop()
+            current.append(action)
+            if isinstance(action, StartWave):
+                waves.append(current)
+                current = []
+                saw_start = True
+        if not waves and not saw_start:
+            raise ValueError("Replay actions contain no StartWave")
+        seed = int(data.get("engine_seed", data.get("seed", 1)))
+        return Replay(
+            map_path=map_path,
+            seed=seed,
+            waves=waves,
+            state_hashes=None,
+            final_summary=None,
+        )
     waves_raw = data.get("waves", []) or []
     waves: list[list[Action]] = []
     for wave in waves_raw:

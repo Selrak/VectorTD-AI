@@ -45,9 +45,12 @@ def main() -> int:
     ap.add_argument("--steps", type=int, default=20)
     ap.add_argument("--max-build-actions", type=int, default=100)
     ap.add_argument("--max-wave-ticks", type=int, default=20_000)
+    ap.add_argument("--action-space-kind", choices=["legacy", "discrete_k"], default="legacy")
     args = ap.parse_args()
 
     env = VectorTDEventEnv(
+        default_map=args.map,
+        action_space_kind=args.action_space_kind,
         max_build_actions=args.max_build_actions,
         max_wave_ticks=args.max_wave_ticks,
     )

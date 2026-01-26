@@ -2206,7 +2206,9 @@ class SimpleGui:
 
     def _handle_next_wave_click(self) -> None:
         if self.state.paused:
-            return
+            if self._replay is None:
+                return
+            self.state.paused = False
         if self._replay is not None:
             if self._replay_finished():
                 self._restart_replay(start_playing=True)

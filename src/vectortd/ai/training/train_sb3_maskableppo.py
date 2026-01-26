@@ -199,6 +199,7 @@ def make_train_env(
     run_dir: str,
     max_build_actions: int,
     max_wave_ticks: int,
+    action_space_kind: str,
     reward_config,
     place_cell_top_k: int | None,
     cpu_id: int | None,
@@ -211,6 +212,7 @@ def make_train_env(
         log_dir = Path(run_dir) / "console"
         env = VectorTDEventEnv(
             default_map=map_path,
+            action_space_kind=action_space_kind,
             max_build_actions=max_build_actions,
             max_wave_ticks=max_wave_ticks,
             reward_config=reward_config,
@@ -237,6 +239,7 @@ def make_eval_env(
     run_dir: str,
     max_build_actions: int,
     max_wave_ticks: int,
+    action_space_kind: str,
     reward_config,
     place_cell_top_k: int | None,
     cpu_id: int | None,
@@ -248,6 +251,7 @@ def make_eval_env(
         log_dir = Path(run_dir) / "console"
         env = VectorTDEventEnv(
             default_map=map_path,
+            action_space_kind=action_space_kind,
             max_build_actions=max_build_actions,
             max_wave_ticks=max_wave_ticks,
             reward_config=reward_config,
@@ -275,6 +279,7 @@ class BestReplayCallback(BaseCallback):
         replay_seed: int,
         max_build_actions: int,
         max_wave_ticks: int,
+        action_space_kind: str,
         reward_config,
         place_cell_top_k: int | None,
     ) -> None:
@@ -284,6 +289,7 @@ class BestReplayCallback(BaseCallback):
         self.replay_seed = replay_seed
         self.max_build_actions = max_build_actions
         self.max_wave_ticks = max_wave_ticks
+        self.action_space_kind = action_space_kind
         self.reward_config = reward_config
         self.place_cell_top_k = place_cell_top_k
 
@@ -295,6 +301,7 @@ class BestReplayCallback(BaseCallback):
         self.replay_dir.mkdir(parents=True, exist_ok=True)
         env = VectorTDEventEnv(
             default_map=self.map_path,
+            action_space_kind=self.action_space_kind,
             max_build_actions=self.max_build_actions,
             max_wave_ticks=self.max_wave_ticks,
             reward_config=self.reward_config,
@@ -447,6 +454,7 @@ def main() -> int:
             "log_interval_sec": 0.0,
         },
         "env": {
+            "action_space_kind": "legacy",
             "max_build_actions": 100,
             "max_wave_ticks": 20_000,
             "deterministic_eval": True,
@@ -520,6 +528,8 @@ def main() -> int:
     max_build_actions = int(cfg["env"]["max_build_actions"])
     max_wave_ticks = int(cfg["env"]["max_wave_ticks"])
     deterministic_eval = bool(cfg["env"].get("deterministic_eval", True))
+    action_space_kind = cfg["env"].get("action_space_kind") or "legacy"
+    action_space_kind = str(action_space_kind)
     place_cell_top_k = cfg["masking"].get("place_cell_top_k")
     if place_cell_top_k is not None:
         place_cell_top_k = int(place_cell_top_k)
@@ -591,6 +601,7 @@ def main() -> int:
         "max_build_actions": max_build_actions,
         "max_wave_ticks": max_wave_ticks,
         "deterministic_eval": deterministic_eval,
+        "action_space_kind": action_space_kind,
         "place_cell_top_k": place_cell_top_k,
         "tensorboard_log": tb_log,
         "debug": args.debug,
@@ -649,6 +660,7 @@ def main() -> int:
                 run_dir=str(run_dir),
                 max_build_actions=max_build_actions,
                 max_wave_ticks=max_wave_ticks,
+                action_space_kind=action_space_kind,
                 reward_config=reward_cfg,
                 place_cell_top_k=place_cell_top_k,
                 cpu_id=p_core_cpus[i % len(p_core_cpus)] if p_core_cpus else None,
@@ -667,6 +679,7 @@ def main() -> int:
                 run_dir=str(run_dir),
                 max_build_actions=max_build_actions,
                 max_wave_ticks=max_wave_ticks,
+                action_space_kind=action_space_kind,
                 reward_config=reward_cfg,
                 place_cell_top_k=place_cell_top_k,
                 cpu_id=p_core_cpus[i] if p_core_cpus and i < len(p_core_cpus) else None,
@@ -704,6 +717,7 @@ def main() -> int:
         replay_seed=seed + 42,
         max_build_actions=max_build_actions,
         max_wave_ticks=max_wave_ticks,
+        action_space_kind=action_space_kind,
         reward_config=reward_cfg,
         place_cell_top_k=place_cell_top_k,
     )

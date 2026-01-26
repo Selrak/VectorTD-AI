@@ -40,7 +40,7 @@ def _choose_replay_file_macos(root: Path, last_path: Path | None) -> Path | None
         default_location = last_path
     elif initialdir.exists():
         default_location = initialdir
-    script_lines = ['tell application "System Events" to activate', 'set promptText to "Select replay file"']
+    script_lines = ['set promptText to "Select replay file"']
     if default_location is not None:
         script_lines.append(f"set defaultLoc to POSIX file {json.dumps(str(default_location))} as alias")
         script_lines.append('set chosenFile to choose file with prompt promptText default location defaultLoc')
@@ -53,6 +53,9 @@ def _choose_replay_file_macos(root: Path, last_path: Path | None) -> Path | None
         text=True,
     )
     if result.returncode != 0:
+        details = (result.stderr or result.stdout).strip()
+        if details:
+            print(f"[replay] macOS picker failed: {details}")
         return None
     selected = result.stdout.strip()
     if not selected:
