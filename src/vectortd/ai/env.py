@@ -46,7 +46,7 @@ from .actions import (
 from .masking import compute_action_mask, compute_action_mask_discrete_k
 from .obs import PLACE_CANDIDATE_FEATURES, _tower_slot_features, build_observation
 from .obs_flatten import SCALAR_KEYS, flatten_observation
-from .rewards import RewardConfig, RewardState, compute_reward, compute_reward_breakdown, reward_state_from
+from .rewards import RewardConfig, RewardState, compute_reward_breakdown, reward_state_from
 
 
 logger = logging.getLogger(__name__)
@@ -108,12 +108,6 @@ class VectorTDEventEnv(gym.Env):
         place_cell_top_k: int | None = None,
         strict_invalid_actions: bool = False,
         reward_config: RewardConfig | None = None,
-        build_step_penalty: float = 0.0,
-        no_life_loss_bonus: float = 50.0,
-        terminal_win_bonus: float = 10_000.0,
-        terminal_loss_penalty: float = 10_000.0,
-        build_action_limit_penalty: float = -1.0,
-        invalid_action_penalty: float = 0.0,
         include_action_mask_in_obs: bool = False,
         timing_enabled: bool = False,
         log_dir: str | Path | None = None,
@@ -136,14 +130,7 @@ class VectorTDEventEnv(gym.Env):
         self.strict_invalid_actions = strict_invalid_actions
         self.include_action_mask_in_obs = include_action_mask_in_obs
         if reward_config is None:
-            reward_config = RewardConfig(
-                build_step_penalty=build_step_penalty,
-                no_life_loss_bonus=no_life_loss_bonus,
-                terminal_win_bonus=terminal_win_bonus,
-                terminal_loss_penalty=terminal_loss_penalty,
-                build_action_limit_penalty=build_action_limit_penalty,
-                invalid_action_penalty=invalid_action_penalty,
-            )
+            reward_config = RewardConfig()
         self.reward_config = reward_config
 
         self.timing_enabled = timing_enabled
@@ -162,9 +149,9 @@ class VectorTDEventEnv(gym.Env):
         self._place_candidate_tower_idx: list[int] | None = None
         self.phase = "BUILD"
 
-        self.prev_score = 0
-        self.prev_lives = 0
-        self.prev_bank = 0
+        self._prev_lives = 0
+        self._prev_wave = 0
+        self._episode_return = 0.0
 
         self.episode_actions: list[list[Action]] = []
         self._current_wave_actions: list[Action] = []
@@ -1033,9 +1020,9 @@ class VectorTDEventEnv(gym.Env):
             self._place_candidate_tower_idx = None
 
         self.phase = "BUILD"
-        self.prev_score = int(getattr(self.engine.state, "score", 0))
-        self.prev_lives = int(getattr(self.engine.state, "lives", 0))
-        self.prev_bank = int(getattr(self.engine.state, "bank", 0))
+        self._prev_lives = int(getattr(self.engine.state, "lives", 0))
+        self._prev_wave = int(getattr(self.engine.state, "level", 0))
+        self._episode_return = 0.0
 
         self.episode_actions = []
         self._current_wave_actions = []
@@ -1324,18 +1311,6 @@ class VectorTDEventEnv(gym.Env):
         if forced_start_wave:
             info["action_forced_start_wave"] = True
 
-        build_action_type = None
-        build_action_effective = None
-        if not isinstance(action_obj, StartWave):
-            build_action_type = "OTHER"
-            build_action_effective = True
-            if isinstance(action_obj, Noop):
-                build_action_type = "NOOP"
-                build_action_effective = False
-            elif isinstance(action_obj, SetMode):
-                build_action_type = "SET_MODE"
-                build_action_effective = self._is_set_mode_effective(action_obj)
-
         if self.debug_actions:
             self._debug_record_action(
                 action_obj,
@@ -1397,72 +1372,54 @@ class VectorTDEventEnv(gym.Env):
         if self.debug_actions:
             self._debug_check_ranges(new_state)
         episode_done = self.phase == "DONE"
+        truncated = False
+        done = episode_done or truncated
         game_won = bool(getattr(self.engine.state, "game_won", False))
+        waves_cleared = int(new_state.level)
+        if done and not game_won and waves_cleared > 0:
+            waves_cleared -= 1
         reward_start = time.perf_counter() if self.timing_enabled else 0.0
-        reward = compute_reward(
+        breakdown = compute_reward_breakdown(
             prev_state,
             new_state,
-            phase_transition=phase_transition,
             config=self.reward_config,
-            build_action_type=build_action_type,
-            build_action_effective=build_action_effective,
-            invalid_action=invalid_action,
-            build_action_limit_violation=build_action_limit_violation,
-            episode_done=episode_done,
+            episode_done=done,
             game_won=game_won,
         )
+        reward = float(breakdown["total"])
         if self.timing_enabled:
             self.timing["reward_time_total"] = self.timing.get("reward_time_total", 0.0) + (
                 time.perf_counter() - reward_start
             )
-        if self.debug_actions and (
-            phase_transition == "WAVE_COMPLETE"
-            or invalid_action
-            or build_action_limit_violation
-            or episode_done
-        ):
-            breakdown = compute_reward_breakdown(
-                prev_state,
-                new_state,
-                phase_transition=phase_transition,
-                config=self.reward_config,
-                build_action_type=build_action_type,
-                build_action_effective=build_action_effective,
-                invalid_action=invalid_action,
-                build_action_limit_violation=build_action_limit_violation,
-                episode_done=episode_done,
-                game_won=game_won,
-            )
+        info["r_life"] = breakdown["r_life"]
+        info["r_wave"] = breakdown["r_wave"]
+        info["r_terminal"] = breakdown["r_terminal"]
+        info["lives"] = int(new_state.lives)
+        info["wave"] = waves_cleared
+        info["done"] = bool(done)
+        if self.debug_actions:
             info["reward_breakdown"] = breakdown
-            self._log_line(
-                "debug_reward phase={} total={} score_delta={} bank_delta={} lives_lost={} no_life_loss_bonus={} "
-                "life_loss_penalty={} build_step_penalty={} noop_penalty={} set_mode_penalty={} "
-                "set_mode_noop_penalty={} invalid_action_penalty={} build_action_limit_penalty={} "
-                "terminal_bonus={} terminal_penalty={}".format(
-                    phase_transition,
-                    breakdown["total"],
-                    breakdown["score_delta"],
-                    breakdown["bank_delta"],
-                    breakdown["lives_lost"],
-                    breakdown["no_life_loss_bonus"],
-                    breakdown["life_loss_penalty"],
-                    breakdown["build_step_penalty"],
-                    breakdown["noop_penalty"],
-                    breakdown["set_mode_penalty"],
-                    breakdown["set_mode_noop_penalty"],
-                    breakdown["invalid_action_penalty"],
-                    breakdown["build_action_limit_penalty"],
-                    breakdown["terminal_bonus"],
-                    breakdown["terminal_penalty"],
+            if phase_transition == "WAVE_COMPLETE" or done:
+                self._log_line(
+                    "debug_reward phase={} total={} r_life={} r_wave={} r_terminal={} delta_lives={} "
+                    "delta_waves={} done={} win={}".format(
+                        phase_transition,
+                        breakdown["total"],
+                        breakdown["r_life"],
+                        breakdown["r_wave"],
+                        breakdown["r_terminal"],
+                        breakdown["delta_lives"],
+                        breakdown["delta_waves"],
+                        bool(done),
+                        bool(game_won),
+                    )
                 )
-            )
 
-        self.prev_score = new_state.score
-        self.prev_lives = new_state.lives
-        self.prev_bank = new_state.bank
+        self._prev_lives = new_state.lives
+        self._prev_wave = new_state.level
+        self._episode_return += float(reward)
 
         terminated = episode_done
-        truncated = False
         mask_after = self._compute_action_mask()
         self._last_action_mask = mask_after
         obs_start = time.perf_counter() if self.timing_enabled else 0.0
@@ -1496,17 +1453,23 @@ class VectorTDEventEnv(gym.Env):
             self.timing["step_time_total"] = self.timing.get("step_time_total", 0.0) + (
                 time.perf_counter() - step_start
             )
-        if terminated:
+        if done:
             state = self.engine.state
             self._log_line(
                 "episode_done wave={} lives={} score={} bank={} game_won={}".format(
-                    int(getattr(state, "level", 0)),
+                    waves_cleared,
                     int(getattr(state, "lives", 0)),
                     int(getattr(state, "score", 0)),
                     int(getattr(state, "bank", 0)),
                     bool(getattr(state, "game_won", False)),
                 )
             )
+            info["episode_summary"] = {
+                "total_reward": float(self._episode_return),
+                "waves_cleared": waves_cleared,
+                "lives_end": int(new_state.lives),
+                "win": bool(game_won),
+            }
             if self.debug_actions:
                 self._debug_log_episode_summary(wave=int(getattr(state, "level", 0)))
         else:

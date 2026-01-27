@@ -329,15 +329,10 @@ def main() -> int:
     ap.add_argument("--eval-every", type=int, default=0)
     ap.add_argument("--eval-map", action="append", default=None)
     ap.add_argument("--eval-seed", action="append", default=None)
-    ap.add_argument("--score-weight", type=float, default=1.0)
-    ap.add_argument("--bank-weight", type=float, default=0.0)
-    ap.add_argument("--life-loss-penalty", type=float, default=100.0)
-    ap.add_argument("--no-life-loss-bonus", type=float, default=50.0)
-    ap.add_argument("--terminal-win-bonus", type=float, default=10000.0)
-    ap.add_argument("--terminal-loss-penalty", type=float, default=10000.0)
-    ap.add_argument("--build-step-penalty", type=float, default=0.0)
-    ap.add_argument("--build-action-limit-penalty", type=float, default=-1.0)
-    ap.add_argument("--invalid-action-penalty", type=float, default=0.0)
+    ap.add_argument("--life-loss-penalty", type=float, default=0.5)
+    ap.add_argument("--wave-total-reward", type=float, default=8.0)
+    ap.add_argument("--terminal-win-reward", type=float, default=2.0)
+    ap.add_argument("--terminal-loss-reward", type=float, default=-2.0)
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--pause", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--pause-key", default="space")
@@ -358,15 +353,10 @@ def main() -> int:
     replay_dir = Path(args.replay_dir) if args.replay_dir else root_dir / "runs" / "training" / "replays"
 
     reward_config = RewardConfig(
-        score_weight=args.score_weight,
-        bank_weight=args.bank_weight,
         life_loss_penalty=args.life_loss_penalty,
-        no_life_loss_bonus=args.no_life_loss_bonus,
-        terminal_win_bonus=args.terminal_win_bonus,
-        terminal_loss_penalty=args.terminal_loss_penalty,
-        build_step_penalty=args.build_step_penalty,
-        build_action_limit_penalty=args.build_action_limit_penalty,
-        invalid_action_penalty=args.invalid_action_penalty,
+        wave_total_reward=args.wave_total_reward,
+        terminal_win_reward=args.terminal_win_reward,
+        terminal_loss_reward=args.terminal_loss_reward,
     )
 
     env = VectorTDEventEnv(
@@ -386,15 +376,11 @@ def main() -> int:
         "max_waves": args.max_waves,
         "max_build_actions": args.max_build_actions,
         "reward_config": {
-            "score_weight": reward_config.score_weight,
-            "bank_weight": reward_config.bank_weight,
             "life_loss_penalty": reward_config.life_loss_penalty,
-            "no_life_loss_bonus": reward_config.no_life_loss_bonus,
-            "terminal_win_bonus": reward_config.terminal_win_bonus,
-            "terminal_loss_penalty": reward_config.terminal_loss_penalty,
-            "build_step_penalty": reward_config.build_step_penalty,
-            "build_action_limit_penalty": reward_config.build_action_limit_penalty,
-            "invalid_action_penalty": reward_config.invalid_action_penalty,
+            "wave_total_reward": reward_config.wave_total_reward,
+            "terminal_win_reward": reward_config.terminal_win_reward,
+            "terminal_loss_reward": reward_config.terminal_loss_reward,
+            "max_waves": reward_config.max_waves,
         },
     }
 

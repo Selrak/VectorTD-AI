@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from vectortd.core.rules.wave_spawner import LEVELS
+
+
+REWARD_LIFE_LOSS = 0.5
+REWARD_WAVE_TOTAL = 8.0
+REWARD_TERMINAL_WIN = 2.0
+REWARD_TERMINAL_LOSS = -2.0
+DEFAULT_MAX_WAVES = len(LEVELS)
+
 
 @dataclass(frozen=True, slots=True)
 class RewardState:
@@ -13,19 +22,11 @@ class RewardState:
 
 @dataclass(frozen=True, slots=True)
 class RewardConfig:
-    score_weight: float = 1.0
-    score_delta_clip: float | None = None
-    bank_weight: float = 0.0
-    life_loss_penalty: float = 100.0
-    no_life_loss_bonus: float = 50.0
-    terminal_win_bonus: float = 10_000.0
-    terminal_loss_penalty: float = 10_000.0
-    build_step_penalty: float = 0.0
-    noop_penalty: float = 0.0
-    set_mode_penalty: float = 0.0
-    set_mode_noop_penalty: float = 0.0
-    build_action_limit_penalty: float = 0.0
-    invalid_action_penalty: float = 0.0
+    life_loss_penalty: float = REWARD_LIFE_LOSS
+    wave_total_reward: float = REWARD_WAVE_TOTAL
+    terminal_win_reward: float = REWARD_TERMINAL_WIN
+    terminal_loss_reward: float = REWARD_TERMINAL_LOSS
+    max_waves: int | None = DEFAULT_MAX_WAVES
 
 
 def reward_state_from(state) -> RewardState:
@@ -41,131 +42,56 @@ def compute_reward(
     prev_state: RewardState,
     new_state: RewardState,
     *,
-    phase_transition: str,
     config: RewardConfig,
-    build_action_type: str | None = None,
-    build_action_effective: bool | None = None,
-    invalid_action: bool = False,
-    build_action_limit_violation: bool = False,
     episode_done: bool = False,
     game_won: bool = False,
 ) -> float:
-    reward = 0.0
-    if phase_transition == "BUILD_ACTION":
-        reward += config.build_step_penalty
-        if build_action_type == "NOOP":
-            reward += config.noop_penalty
-        elif build_action_type == "SET_MODE":
-            reward += config.set_mode_penalty
-            if build_action_effective is False:
-                reward += config.set_mode_noop_penalty
-    elif phase_transition == "WAVE_COMPLETE":
-        bank_delta = new_state.bank - prev_state.bank
-        score_delta = new_state.score - prev_state.score
-        if config.score_delta_clip is not None:
-            clip = abs(float(config.score_delta_clip))
-            score_delta = max(min(score_delta, clip), -clip)
-        lives_delta = new_state.lives - prev_state.lives
-        lives_lost = max(0, -lives_delta)
-        reward += score_delta * config.score_weight
-        reward += bank_delta * config.bank_weight
-        if lives_lost == 0:
-            reward += config.no_life_loss_bonus
-        reward -= lives_lost * config.life_loss_penalty
-    if invalid_action:
-        reward += config.invalid_action_penalty
-    if build_action_limit_violation:
-        reward += config.build_action_limit_penalty
-    if episode_done:
-        if game_won:
-            reward += config.terminal_win_bonus
-        else:
-            reward -= config.terminal_loss_penalty
-    return float(reward)
+    breakdown = compute_reward_breakdown(
+        prev_state,
+        new_state,
+        config=config,
+        episode_done=episode_done,
+        game_won=game_won,
+    )
+    return float(breakdown["total"])
+
+
+def _wave_reward_scale(config: RewardConfig) -> float:
+    max_waves = config.max_waves
+    if max_waves is None:
+        return 0.2
+    max_waves_int = int(max_waves)
+    if max_waves_int > 0:
+        return float(config.wave_total_reward) / float(max_waves_int)
+    return 0.2
 
 
 def compute_reward_breakdown(
     prev_state: RewardState,
     new_state: RewardState,
     *,
-    phase_transition: str,
     config: RewardConfig,
-    build_action_type: str | None = None,
-    build_action_effective: bool | None = None,
-    invalid_action: bool = False,
-    build_action_limit_violation: bool = False,
     episode_done: bool = False,
     game_won: bool = False,
 ) -> dict[str, float]:
-    reward = 0.0
-    score_delta = 0.0
-    bank_delta = 0.0
-    lives_lost = 0.0
-    no_life_loss_bonus = 0.0
-    life_loss_penalty = 0.0
-    build_step_penalty = 0.0
-    noop_penalty = 0.0
-    set_mode_penalty = 0.0
-    set_mode_noop_penalty = 0.0
-    invalid_action_penalty = 0.0
-    build_action_limit_penalty = 0.0
-    terminal_bonus = 0.0
-    terminal_penalty = 0.0
+    delta_lives = max(0, prev_state.lives - new_state.lives)
+    delta_waves = max(0, new_state.level - prev_state.level)
+    if episode_done and not game_won and delta_waves > 0:
+        delta_waves -= 1
 
-    if phase_transition == "BUILD_ACTION":
-        build_step_penalty = float(config.build_step_penalty)
-        reward += build_step_penalty
-        if build_action_type == "NOOP":
-            noop_penalty = float(config.noop_penalty)
-            reward += noop_penalty
-        elif build_action_type == "SET_MODE":
-            set_mode_penalty = float(config.set_mode_penalty)
-            reward += set_mode_penalty
-            if build_action_effective is False:
-                set_mode_noop_penalty = float(config.set_mode_noop_penalty)
-                reward += set_mode_noop_penalty
-    elif phase_transition == "WAVE_COMPLETE":
-        bank_delta = float(new_state.bank - prev_state.bank)
-        score_delta = float(new_state.score - prev_state.score)
-        if config.score_delta_clip is not None:
-            clip = abs(float(config.score_delta_clip))
-            score_delta = max(min(score_delta, clip), -clip)
-        lives_delta = new_state.lives - prev_state.lives
-        lives_lost = float(max(0, -lives_delta))
-        reward += score_delta * config.score_weight
-        reward += bank_delta * config.bank_weight
-        if lives_lost == 0:
-            no_life_loss_bonus = float(config.no_life_loss_bonus)
-            reward += no_life_loss_bonus
-        life_loss_penalty = float(lives_lost * config.life_loss_penalty)
-        reward -= life_loss_penalty
-    if invalid_action:
-        invalid_action_penalty = float(config.invalid_action_penalty)
-        reward += invalid_action_penalty
-    if build_action_limit_violation:
-        build_action_limit_penalty = float(config.build_action_limit_penalty)
-        reward += build_action_limit_penalty
+    r_life = -float(config.life_loss_penalty) * float(delta_lives)
+    r_wave = _wave_reward_scale(config) * float(delta_waves)
     if episode_done:
-        if game_won:
-            terminal_bonus = float(config.terminal_win_bonus)
-            reward += terminal_bonus
-        else:
-            terminal_penalty = float(config.terminal_loss_penalty)
-            reward -= terminal_penalty
+        r_terminal = float(config.terminal_win_reward) if game_won else float(config.terminal_loss_reward)
+    else:
+        r_terminal = 0.0
 
+    total = float(r_life + r_wave + r_terminal)
     return {
-        "total": float(reward),
-        "score_delta": score_delta,
-        "bank_delta": bank_delta,
-        "lives_lost": lives_lost,
-        "no_life_loss_bonus": no_life_loss_bonus,
-        "life_loss_penalty": life_loss_penalty,
-        "build_step_penalty": build_step_penalty,
-        "noop_penalty": noop_penalty,
-        "set_mode_penalty": set_mode_penalty,
-        "set_mode_noop_penalty": set_mode_noop_penalty,
-        "invalid_action_penalty": invalid_action_penalty,
-        "build_action_limit_penalty": build_action_limit_penalty,
-        "terminal_bonus": terminal_bonus,
-        "terminal_penalty": terminal_penalty,
+        "total": total,
+        "r_life": float(r_life),
+        "r_wave": float(r_wave),
+        "r_terminal": float(r_terminal),
+        "delta_lives": float(delta_lives),
+        "delta_waves": float(delta_waves),
     }
